@@ -4,6 +4,9 @@ on:
     branches: [ master, stable ]
   pull_request:
     branches: [ master, stable ]
+  # Allows you to run this workflow manually from the Actions tab.
+  workflow_dispatch:
+
 jobs:
   build:
     name: node.js
@@ -12,7 +15,7 @@ jobs:
     strategy:
       matrix:
         # Support LTS versions based on https://nodejs.org/en/about/releases/
-        node-version: ['14', '16']
+        node-version: ['18', '20']
     steps:
       - uses: actions/checkout@v3
       - name: Use Node.js ${{ matrix.node-version }}
