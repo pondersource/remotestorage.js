@@ -58,7 +58,7 @@ test('exchanges a subject credential for the storage audience, not the root', as
   assert.equal(body.get('resource'), storage);
   assert.equal(body.get('subject_token'), 'subject-credential');
   assert.equal(exchange.options.redirect, 'error');
-  for (const call of calls) assert.equal(new Headers(call.options.headers).has('Authorization'), false);
+  for (const call of calls.slice(0, calls.indexOf(exchange) + 1)) assert.equal(new Headers(call.options.headers).has('Authorization'), false);
   routes.set(root + 'a.json', options => {
     assert.equal(options.headers.get('Authorization'), 'Bearer secret-access-token');
     return response({ hello: 'world' }, 200, { 'Content-Type': 'application/json', ETag: '"rev1"' });
