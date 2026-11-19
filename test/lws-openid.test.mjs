@@ -51,6 +51,7 @@ test('PKCE redirect resumes after reload and exchanges a validated signed ID Tok
   assert.ok(f.navigation.searchParams.get('nonce'));
   assert.ok(![...f.values.values()].join('').includes('oidc-access-token'));
   const afterReload = f.openid();
+  assert.equal(OpenID.isRedirect(f.callback()), true);
   assert.deepEqual(await afterReload.handleIncomingRedirect(f.callback()), context);
   assert.equal(f.values.size, 0);
   const credential = await afterReload.get({ ...context, interactive: false });
