@@ -10,7 +10,7 @@ const data = await mkdtemp(join(tmpdir(), 'rs-lwsd-interop-'));
 const port = process.env.LWSD_PORT || (java ? '3127' : '3126');
 const url = 'http://127.0.0.1:' + port + (java ? '/' : '/lws/');
 const server = java
-  ? spawn('java', ['-Dlws.base-uri=' + url, '-Dlws.listen-port=' + port, '-Dlws.dev.open=true', '-Dlws.public-read=true', '-Dlws.data-dir=' + data,
+  ? spawn('java', ['-Dserver.address=127.0.0.1', '-Dlws.base-uri=' + url, '-Dlws.listen-port=' + port, '-Dlws.dev.open=true', '-Dlws.public-read=true', '-Dlws.data-dir=' + data,
     '-Dlws.cors.allowed-origins=http://127.0.0.1:42123', '-jar', join(checkout, 'target/lws-server.jar')], { stdio: 'inherit' })
   : spawn(process.execPath, [join(checkout, 'index.js'), '--no-auth', '--host', '127.0.0.1', '--port', port, '--root', data], { stdio: 'inherit' });
 let spawnError;
