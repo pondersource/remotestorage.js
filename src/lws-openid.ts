@@ -81,6 +81,9 @@ class LWSOpenID {
       !current.searchParams.has('state') || current.searchParams.get('state') !== pending.state) return undefined;
     // Consume before any token request, including an error/cancel response.
     sessionStorage.removeItem(KEY);
+    const clean = new URL(current.href);
+    for (const key of ['code', 'state', 'iss', 'session_state', 'error', 'error_description']) clean.searchParams.delete(key);
+    window.history.replaceState(window.history.state, '', clean.href);
     if (pending.version !== 1 || pending.issuer !== this.options.issuer || pending.clientId !== this.options.clientId ||
       pending.redirectUri !== this.options.redirectUri || !Number.isFinite(pending.created) ||
       Date.now() - pending.created > 10 * 60 * 1000 || pending.created > Date.now()) throw new Error('LWS sign-in state expired or changed.');
@@ -97,9 +100,6 @@ class LWSOpenID {
     try { new URL(claims.sub); } catch { throw new Error('The OpenID credential must use a URI subject for LWS.'); }
     if (epoch !== this.epoch) throw new Error('LWS sign-in was cancelled.');
     this.credential = { token: result.id_token, expires: claims.exp * 1000, context: pending.context };
-    // Keep application query parameters while removing OAuth response parameters.
-    for (const key of ['code', 'state', 'iss', 'session_state', 'error', 'error_description']) current.searchParams.delete(key);
-    window.history.replaceState(window.history.state, '', current.href);
     return pending.context;
   }
 
