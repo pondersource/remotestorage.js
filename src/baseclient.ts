@@ -657,6 +657,7 @@ export class BaseClient {
       throw 'Argument \'path\' of baseClient.getItemURL must be a string';
     }
     if (this.storage.connected) {
+      if (this.storage.backend === 'lws') return this.storage.lws.getFileURL(this.makePath(path));
       path = cleanPath(this.makePath(path));
       return this.storage.remote.href + path;
     } else {
@@ -845,3 +846,4 @@ export interface BaseClient extends EventHandling {}
 applyMixins(BaseClient, [EventHandling]);
 
 export default BaseClient;
+

@@ -21,6 +21,7 @@ import { EventHandling, EventHandler } from './eventhandling';
 import GoogleDrive from './googledrive';
 import Dropbox from './dropbox';
 import Solid from './solid';
+import LWS from './lws';
 import Discover from './discover';
 import SyncError from './sync-error';
 import UnauthorizedError from './unauthorized-error';
@@ -324,7 +325,7 @@ export class RemoteStorage {
 
   /**
    */
-  backend: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid';
+  backend: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws';
 
   /**
    * Depending on the chosen backend, this is either an instance of `WireClient`,
@@ -357,6 +358,8 @@ export class RemoteStorage {
    */
   googledrive: GoogleDrive;
   solid: Solid;
+  lws: LWS;
+  _lwsPreviousRemote?: Remote;
 
   /**
    * @internal
@@ -389,7 +392,7 @@ export class RemoteStorage {
 
       const backendType = localStorage.getItem('remotestorage:backend');
 
-      if (backendType === 'dropbox' || backendType === 'googledrive' || backendType === 'solid') {
+      if (backendType === 'dropbox' || backendType === 'googledrive' || backendType === 'solid' || backendType === 'lws') {
         this.setBackend(backendType);
       } else {
         this.setBackend('remotestorage');
@@ -682,7 +685,7 @@ export class RemoteStorage {
   /**
    * @internal
    */
-  setBackend (backendType: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid'): void {
+  setBackend (backendType: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws'): void {
     this.backend = backendType;
 
     if (hasLocalStorage) {
@@ -1286,3 +1289,4 @@ export interface RemoteStorage extends EventHandling {}
 applyMixins(RemoteStorage, [EventHandling]);
 
 export default RemoteStorage;
+

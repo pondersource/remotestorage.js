@@ -1,4 +1,4 @@
-import RemoteStorage from "./remotestorage";
+import type RemoteStorage from "./remotestorage";
 import EventHandling from "./eventhandling";
 import { isFolder } from "./util";
 
@@ -155,3 +155,4 @@ export interface Remote {
 
   delete (path: string, options: { ifMatch?: string }): Promise<RemoteResponse>;
 }
+

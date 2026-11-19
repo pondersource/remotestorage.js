@@ -1,4 +1,5 @@
 import log from './log';
+import LWSOpenID from './lws-openid';
 import RemoteStorage from './remotestorage';
 import { localStorageAvailable, globalContext, toBase64 } from './util';
 import UnauthorizedError from './unauthorized-error';
@@ -255,7 +256,9 @@ export class Authorize {
   }
 
   static _rs_init = function (remoteStorage: RemoteStorage): void {
-    const params = extractParams();
+    // LWS owns its PKCE callback. Do not consume its code, error, or router state
+    // with the remoteStorage/Dropbox/Drive authorization handler.
+    const params = LWSOpenID.isRedirect(Authorize.getLocation().href) ? undefined : extractParams();
     let location: Location;
 
     if (params) {
@@ -369,3 +372,4 @@ export class Authorize {
 }
 
 export default Authorize;
+

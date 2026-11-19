@@ -12,6 +12,7 @@
   },
   "homepage": "https://remotestorage.io",
   "scripts": {
+    "test:lws:interop": "node scripts/run-lwsd-interop.mjs",
     "test": "tsc && bash scripts/test-all.sh",
     "test:mocha": "mocha test/unit/*.test.mjs",
     "test:watch": "mocha test/unit/*.test.mjs --watch --reporter dot",
@@ -57,6 +58,7 @@
     "webpack-cli": "^5.1.4"
   },
   "dependencies": {
+    "oauth4webapi": "3.8.4",
     "@inrupt/solid-client": "^1.30.2",
     "@inrupt/solid-client-authn-browser": "^1.17.5",
     "@inrupt/vocab-common-rdf": "^1.0.5",
@@ -75,3 +77,4 @@
     "fsevents": "^2.3.2"
   }
 }
+
