@@ -82,3 +82,16 @@ test('a stale mapping can be replaced after its resource was removed outside rs.
   assert.notEqual(a.getFileURL('/note'), original);
   assert.equal((await a.get('/note')).body, 'second');
 });
+
+test('existing native files and foreign opaque resources survive rs.js writes', async t => {
+  const server = await createServer({ rootPath: '/root/' }); t.after(server.close);
+  server.resources.set(server.base + '/root/existing.txt', { body: 'existing native file', type: 'text/plain', revision: 100 });
+  server.resources.set(server.base + '/foreign', { body: 'another app', type: 'text/plain', revision: 101 });
+  const a = await client(server);
+  assert.equal((await a.get('/existing.txt')).body, 'existing native file');
+  assert.equal((await a.put('/existing.txt', 'do not overwrite', 'text/plain', { ifNoneMatch: '*' })).statusCode, 412);
+  await a.put('/notes/new.txt', 'new', 'text/plain', { ifNoneMatch: '*' });
+  assert.deepEqual(Object.keys((await a.get('/')).body).sort(), ['existing.txt', 'notes/']);
+  assert.equal(server.resources.get(server.base + '/foreign').body, 'another app');
+  assert.equal(server.resources.get(server.base + '/root/existing.txt').body, 'existing native file');
+});
