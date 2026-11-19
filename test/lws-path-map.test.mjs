@@ -73,3 +73,12 @@ test('an indeterminate index commit keeps the already-created data recoverable',
   assert.equal((await b.get('/recover')).body, 'safe');
   assert.equal((await b.put('/recover', 'retry', 'text/plain', { ifNoneMatch: '*' })).statusCode, 412);
 });
+
+test('a stale mapping can be replaced after its resource was removed outside rs.js', async t => {
+  const server = await createServer(); t.after(server.close);
+  const a = await client(server); await a.put('/note', 'first', 'text/plain');
+  const original = a.getFileURL('/note'); server.resources.delete(original);
+  assert.equal((await a.put('/note', 'second', 'text/plain', { ifNoneMatch: '*' })).statusCode, 201);
+  assert.notEqual(a.getFileURL('/note'), original);
+  assert.equal((await a.get('/note')).body, 'second');
+});
