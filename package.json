@@ -12,6 +12,7 @@
   },
   "homepage": "https://remotestorage.io",
   "scripts": {
+    "test:lws:interop": "node scripts/run-lwsd-interop.mjs",
     "test": "tsc && bash scripts/test-all.sh",
     "test:mocha": "mocha test/unit/*.test.mjs",
     "test:watch": "mocha test/unit/*.test.mjs --watch --reporter dot",
