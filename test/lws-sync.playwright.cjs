@@ -4,8 +4,9 @@ const { readFileSync } = require('node:fs');
 const { resolve, basename } = require('node:path');
 const { createServer } = require('./lws-server.cjs');
 let storage, app, address;
+const external = process.env.LWS_REAL_SERVER_URL;
 test.beforeAll(async () => {
-  storage = await createServer();
+  storage = external ? { close: async () => {} } : await createServer();
   app = http.createServer((req, res) => {
     if (req.url.endsWith('.js')) {
       try { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end(readFileSync(resolve(__dirname, '../release', basename(req.url)))); }
@@ -20,7 +21,7 @@ test.beforeAll(async () => {
       window.notes = rs.scope('/notes/');
       rs.on('error', error => window.errors.push(error.message));
       rs.on('ready', () => { window.ready = true; });
-      window.connectStorage = async () => { rs.lws.setStorageURL(${JSON.stringify(storage.base + '/storage')}); await rs.lws.connect(); };
+      window.connectStorage = async () => { rs.lws.setStorageURL(${JSON.stringify(external || storage.base + '/storage')}); await rs.lws.connect(); };
     </script></body></html>`);
   });
   await new Promise(resolve => app.listen(0, '127.0.0.1', resolve));
@@ -34,21 +35,26 @@ async function connect(page) {
   catch (error) { throw new Error(error.message + '\nBrowser errors: ' + messages.join('\n')); }
   await page.evaluate(() => window.connectStorage());
 }
-const files = () => [...storage.resources.values()].filter(r => r.type === 'text/plain');
+const fileBodies = async () => {
+  if (!external) return [...storage.resources.values()].filter(r => r.type === 'text/plain').map(r => r.body);
+  const response = await fetch(external, { headers: { Accept: 'application/lws+json' } });
+  const root = await response.json();
+  return Promise.all(root.items.filter(item => item.format?.split(';')[0] === 'text/plain').map(async item => (await fetch(new URL(item.id, external))).text()));
+};
 
 test('the real rs.js cache syncs offline edits and a new browser pulls them from opaque LWS URLs', async ({ page, context, browser }) => {
   await connect(page);
   await page.evaluate(() => notes.storeFile('text/plain', 'a.txt', 'first revision'));
-  await expect.poll(() => files().map(f => f.body), { timeout: 20000 }).toEqual(['first revision']);
+  await expect.poll(fileBodies, { timeout: 20000 }).toEqual(['first revision']);
 
   await page.evaluate(() => rs.stopSync());
   await context.setOffline(true);
   await page.evaluate(() => notes.storeFile('text/plain', 'a.txt', 'edited while offline'));
   expect(await page.evaluate(async () => (await notes.getFile('a.txt')).data)).toBe('edited while offline');
-  expect(files().map(f => f.body)).toEqual(['first revision']);
+  expect(await fileBodies()).toEqual(['first revision']);
   await context.setOffline(false);
   await page.evaluate(() => rs.startSync());
-  await expect.poll(() => files().map(f => f.body), { timeout: 20000 }).toEqual(['edited while offline']);
+  await expect.poll(fileBodies, { timeout: 20000 }).toEqual(['edited while offline']);
 
   const freshContext = await browser.newContext();
   try {
@@ -60,5 +66,5 @@ test('the real rs.js cache syncs offline edits and a new browser pulls them from
   await page.evaluate(() => window.connectStorage());
   expect(await page.evaluate(async () => (await notes.getFile('a.txt')).data)).toBe('edited while offline');
   await page.evaluate(() => notes.remove('a.txt'));
-  await expect.poll(() => files().length, { timeout: 20000 }).toBe(0);
+  await expect.poll(async () => (await fileBodies()).length, { timeout: 20000 }).toBe(0);
 });
