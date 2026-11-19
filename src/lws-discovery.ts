@@ -3,7 +3,7 @@ const STORAGE_REL = 'https://www.w3.org/ns/lws#storage';
 const NS = 'https://www.w3.org/ns/lws#';
 const MAX_DOCUMENT = 262144;
 
-function webURL(value, base) {
+function webURL(value: string, base?: string | URL) {
   const url = new URL(value, base);
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
@@ -44,7 +44,7 @@ function hasType(value, name) {
 
 export async function discoverLWS(address: string, { fetch: request = globalThis.fetch, signal }: { fetch?: typeof fetch; signal?: AbortSignal } = {}) {
   const requested = webURL(address);
-  const options = {
+  const options: RequestInit = {
     credentials: 'omit',
     referrerPolicy: 'no-referrer',
     redirect: 'error',
