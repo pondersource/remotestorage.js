@@ -24,7 +24,7 @@ test.beforeAll(async () => {
       window.connectStorage = async () => { rs.lws.setStorageURL(${JSON.stringify(external || storage.base + '/storage')}); await rs.lws.connect(); };
     </script></body></html>`);
   });
-  await new Promise(resolve => app.listen(0, '127.0.0.1', resolve));
+  await new Promise(resolve => app.listen(Number(process.env.LWS_APP_PORT || 0), '127.0.0.1', resolve));
   address = 'http://127.0.0.1:' + app.address().port;
 });
 test.afterAll(async () => { await storage.close(); await new Promise(resolve => app.close(resolve)); });
@@ -39,7 +39,13 @@ const fileBodies = async () => {
   if (!external) return [...storage.resources.values()].filter(r => r.type === 'text/plain').map(r => r.body);
   const response = await fetch(external, { headers: { Accept: 'application/lws+json' } });
   const root = await response.json();
-  return Promise.all(root.items.filter(item => item.format?.split(';')[0] === 'text/plain').map(async item => (await fetch(new URL(item.id, external))).text()));
+  const index = root.items.find(item => item.format?.split(';')[0] === 'application/vnd.remotestorage.lws-index+json');
+  if (!index) return [];
+  const map = await (await fetch(new URL(index.id, external))).json();
+  const url = map.entries['/notes/a.txt'];
+  if (!url) return [];
+  const file = await fetch(url);
+  return file.status === 404 ? [] : [await file.text()];
 };
 
 test('the real rs.js cache syncs offline edits and a new browser pulls them from opaque LWS URLs', async ({ page, context, browser }) => {
