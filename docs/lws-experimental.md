@@ -106,11 +106,25 @@ signed test tokens. `node --test test/lws*.test.mjs` requires the TypeScript bui
 
 ## Independent server interoperability
 
+The required independent-server job builds **ebremer/lws-server** at
+`97e8ace5f7b0da890b4f8cd96eadec505e1fb16e` with JDK 25 and its transactional
+TDB2 backend. It runs in open test mode on loopback with temporary data and
+allows CORS only for the test app origin. Run the same harness with
+`LWS_SERVER_KIND=ebremer` and a built checkout at `.lws-server/`.
+
 The LWS workflow also starts **linkedwebstorage/lwsd**, pinned at
 `421aaf1b52dd4478eb386b950d3c3da81b658e9b`, with JSS `0.0.222`. This is an
 independent LWS implementation, separate from our deterministic test fixture.
 Its anonymous-write test mode binds only to `127.0.0.1` and uses a disposable
 data directory. Nothing is deployed publicly.
+
+LWSD is a diagnostic target, not a supported concurrent-write target: the first
+real run passed CRUD and conditional writes but returned an empty index body
+during simultaneous updates (`Unexpected end of JSON input`, workflow run
+`44554868871`). Its source uses in-place file writes, exposing a window to
+readers and conditional writers. The unpatched target and regression stay
+visible as a non-blocking diagnostic step; they are not counted as passing
+interoperability. The transactional Java target is a required check.
 
 The runner waits for discovery to respond, runs CRUD/conditional-write and
 concurrent-writer checks, and then runs the actual rs.js browser cache journey
