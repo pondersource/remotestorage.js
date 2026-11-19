@@ -112,8 +112,10 @@ class LWS extends RemoteBase implements Remote {
   }
 
   async connect(): Promise<void> {
-    if (this.rs.remote.connected && this.rs.remote !== this) throw new Error('Disconnect the current storage before connecting LWS.');
+    if (this.rs.remote.connected) throw new Error('Disconnect the current storage before connecting LWS.');
     if (!this.storageURL) throw new Error('Enter an LWS storage URL.');
+    this.token = undefined;
+    this.expires = 0;
     const generation = ++this.generation;
     const discovery = await discoverLWS(this.storageURL, { fetch: this.request });
     await this.authenticate(discovery, generation);
@@ -158,16 +160,19 @@ class LWS extends RemoteBase implements Remote {
 
   private async send(url: string, init: RequestInit = {}): Promise<Response> {
     if (!this.connected) throw new Error('LWS is not connected.');
+    const generation = this.generation;
     if (new URL(url).origin !== new URL(this.href).origin) throw new Error('Refusing an LWS request to another origin.');
     if (this.token && Date.now() >= this.expires - 5000) {
       if (!this.refreshing) this.refreshing = this.authenticate(this.discovery, this.generation).finally(() => { this.refreshing = undefined; });
       await this.refreshing;
     }
+    if (generation !== this.generation || !this.connected) throw new Error('LWS connection was cancelled.');
     const headers = new Headers(init.headers);
     if (this.token) headers.set('Authorization', 'Bearer ' + this.token);
     try {
       const response = await this.request(url, { ...init, headers, credentials: 'omit', redirect: 'error',
         referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(15000) });
+      if (generation !== this.generation) throw new Error('LWS connection was cancelled.');
       this.online = true;
       return response;
     } catch (error) { this.online = false; throw error; }
