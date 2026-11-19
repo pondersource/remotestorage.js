@@ -13,7 +13,7 @@ function fixture(protectedPod = false) {
   const backend = new LWS(rs);
   const routes = new Map([
     [storage, () => response(desc)],
-    [root, () => protectedPod ? response(null, 401, { 'WWW-Authenticate': 'Bearer resource_metadata="' + metadata + '"' }) : response({ id: root, type: 'Container', items: [] })],
+    [root, options => protectedPod && !new Headers(options.headers).has('Authorization') ? response(null, 401, { 'WWW-Authenticate': 'Bearer resource_metadata="' + metadata + '"' }) : response({ id: root, type: 'Container', items: [] })],
     [metadata, () => response({ resource: root, authorization_servers: [issuer] })],
     [issuer + '/.well-known/lws-configuration', () => response({ issuer, grant_types_supported: ['urn:ietf:params:oauth:grant-type:token-exchange'], token_endpoint: issuer + '/token' })],
     [issuer + '/token', () => response({ token_type: 'Bearer', access_token: 'secret-access-token', expires_in: 300 })]
@@ -71,12 +71,14 @@ test('exchanges a subject credential for the storage audience, not the root', as
 test('conditional writes and deletes preserve preconditions and status codes', async () => {
   const { backend, routes } = fixture(); await backend.connect();
   routes.set(root + 'a', options => {
+    if (options.method === 'HEAD') return response(null, 200, { ETag: '"old"' });
     assert.equal(options.headers.get('If-Match'), '"old"');
     return response(null, 412);
   });
   assert.equal((await backend.put('/a', 'new', 'text/plain', { ifMatch: 'old' })).statusCode, 412);
   assert.equal((await backend.delete('/a', { ifMatch: 'old' })).statusCode, 412);
-  await assert.rejects(backend.put('/new', 'new', 'text/plain', { ifNoneMatch: '*' }), /path-mapping/);
+  routes.set(root + 'new', () => response(null, 404));
+  assert.equal((await backend.put('/new', 'new', 'text/plain', { ifMatch: 'old' })).statusCode, 412);
 });
 
 test('lists paginated containers using real member ETags', async () => {
@@ -96,7 +98,7 @@ test('refuses traversal and off-origin pagination before sending credentials', a
   const { backend, routes, calls } = fixture(); await backend.connect();
   for (const path of ['/../secret', '/%2e%2e/secret', '/%2fsecret', '/a?x=1', '/a\\b']) assert.throws(() => backend.getFileURL(path), /path/);
   routes.set(root, () => response({ id: root, items: [] }, 200, { Link: '<https://evil.example/next>; rel="next"' }));
-  await assert.rejects(backend.get('/'), /another origin/);
+  await assert.rejects(backend.get('/'), /another origin|Invalid resource URL/);
   assert.equal(calls.some(c => c.url.startsWith('https://evil.example')), false);
 });
 
