@@ -1,12 +1,14 @@
 import { RemoteBase } from './remote';
 import type { Remote, RemoteResponse, RemoteSettings } from './remote';
 import { discoverLWS } from './lws-discovery';
+import LWSPathMap from './lws-path-map';
+import LWSOpenID from './lws-openid';
 
 const SETTINGS_KEY = 'remotestorage:lws';
 const EXCHANGE = 'urn:ietf:params:oauth:grant-type:token-exchange';
 type Discovery = Awaited<ReturnType<typeof discoverLWS>>;
 type LWSCredentialProvider = (context: {
-  storage: string; authorizationServer: string; metadata: any;
+  storage: string; authorizationServer: string; metadata: any; interactive?: boolean;
 }) => Promise<{ token: string; type: string }>;
 
 /** Experimental adapter for LWS servers preserving hierarchical resource names.
@@ -24,6 +26,8 @@ class LWS extends RemoteBase implements Remote {
   private generation = 0;
   private refreshing: Promise<void>;
   private bridged = false;
+  private paths: LWSPathMap;
+  private openID: LWSOpenID;
 
   constructor(rs) {
     super(rs);
@@ -46,6 +50,27 @@ class LWS extends RemoteBase implements Remote {
     this.credentialProvider = provider;
   }
 
+  configureOpenID(options: ConstructorParameters<typeof LWSOpenID>[0]): void {
+    if (this.openID) this.openID.clear();
+    this.openID = new LWSOpenID(options);
+    this.setCredentialProvider(context => this.openID.get({ ...context, storageURL: this.storageURL }));
+  }
+
+  async handleIncomingRedirect(): Promise<boolean> {
+    if (!this.openID) return false;
+    const context = await this.openID.handleIncomingRedirect();
+    if (!context) return false;
+    this.setStorageURL(context.storageURL);
+    // Rediscovery must still bind to the same storage and authorization server.
+    const fresh = await discoverLWS(this.storageURL, { fetch: this.request });
+    if (fresh.storage !== context.storage || !fresh.authorizationServers.includes(context.authorizationServer)) {
+      this.openID.clear();
+      throw new Error('LWS storage authorization changed during sign-in.');
+    }
+    await this.connect();
+    return true;
+  }
+
   configure(settings: RemoteSettings): void {
     // rs.disconnect and rs.reconnect both clear token state. Never persist tokens.
     if (settings.token === null || settings.userAddress === null) {
@@ -55,15 +80,17 @@ class LWS extends RemoteBase implements Remote {
       this.expires = 0;
     }
     if (settings.userAddress === null) {
+      if (this.openID) this.openID.clear();
       this.storageURL = this.href = this.userAddress = undefined;
       this.discovery = undefined;
+      this.paths = undefined;
       try { localStorage.removeItem(SETTINGS_KEY); } catch { /* unavailable */ }
     } else if (settings.href) {
       this.setStorageURL(settings.href);
     }
   }
 
-  private async authenticate(discovery: Discovery, generation: number): Promise<void> {
+  private async authenticate(discovery: Discovery, generation: number, interactive = false): Promise<void> {
     if (!discovery.authorizationServers.length) return;
     if (!this.credentialProvider) {
       throw new Error('This LWS storage requires sign-in. Configure lws.setCredentialProvider() for its authentication suite.');
@@ -87,7 +114,7 @@ class LWS extends RemoteBase implements Remote {
     if (endpoint.origin !== issuerURL.origin || endpoint.username || endpoint.password || endpoint.hash) {
       throw new Error('LWS token endpoint must be on the advertised issuer origin.');
     }
-    const credential = await this.credentialProvider({ storage: discovery.storage, authorizationServer: issuer, metadata });
+    const credential = await this.credentialProvider({ storage: discovery.storage, authorizationServer: issuer, metadata, interactive });
     if (!credential?.token || !credential.type) throw new Error('No LWS authentication credential was supplied.');
     if (metadata.subject_token_types_supported && !metadata.subject_token_types_supported.includes(credential.type)) {
       throw new Error('The LWS server does not support this credential type.');
@@ -118,17 +145,14 @@ class LWS extends RemoteBase implements Remote {
     this.expires = 0;
     const generation = ++this.generation;
     const discovery = await discoverLWS(this.storageURL, { fetch: this.request });
-    await this.authenticate(discovery, generation);
+    await this.authenticate(discovery, generation, true);
     if (generation !== this.generation) throw new Error('LWS connection was cancelled.');
-    // rs.js paths need a directory-like root. Other naming schemes need a persistent path mapping.
-    if (!new URL(discovery.root).pathname.endsWith('/') || new URL(discovery.root).search) {
-      throw new Error('This experimental LWS adapter requires a directory-style storage root.');
-    }
     this.discovery = discovery;
     this.href = discovery.root;
     this.userAddress = discovery.storage;
     this.connected = true;
     this.online = true;
+    this.paths = new LWSPathMap(discovery.storage, discovery.root, this.send.bind(this));
     this.rs.setBackend('lws');
     if (this.rs.remote !== this) {
       this.rs._lwsPreviousRemote = this.rs.remote;
@@ -153,6 +177,9 @@ class LWS extends RemoteBase implements Remote {
       const decoded = decodeURIComponent(part);
       return decoded === '.' || decoded === '..' || /[\\/]/.test(decoded);
     }) || /[?#\\]/.test(relative)) throw new Error('Invalid LWS resource path.');
+    if (this.paths?.lookup('/' + relative)) return this.paths.lookup('/' + relative);
+    if (!relative) return this.href;
+    if (!new URL(this.href).pathname.endsWith('/') || new URL(this.href).search) return undefined;
     const url = new URL(relative, this.href);
     if (!url.href.startsWith(this.href)) throw new Error('LWS path escapes the storage root.');
     return url.href;
@@ -191,7 +218,24 @@ class LWS extends RemoteBase implements Remote {
   }
 
   async get(path: string, options: { ifMatch?: string; ifNoneMatch?: string } = {}): Promise<RemoteResponse> {
+    this.getFileURL(path); // Validate before index/network access.
+    await this.paths.load();
+    const logical = '/' + path.replace(/^\//, '');
     const url = this.getFileURL(path);
+    if (!path.endsWith('/')) return url ? this.read(url, path, options) : { statusCode: 404 };
+    const virtual = await this.paths.listing(logical);
+    const native = url ? await this.read(url, path, options) : { statusCode: 404 } as RemoteResponse;
+    if (native.statusCode === 404 && Object.keys(virtual).length) return { statusCode: 200, body: virtual, contentType: 'application/json' };
+    if (native.statusCode === 200) {
+      for (const key of Object.keys(virtual)) {
+        if (native.body[key]) throw new Error('Mapped and native LWS paths collide: ' + key);
+        native.body[key] = virtual[key];
+      }
+    }
+    return native;
+  }
+
+  private async read(url: string, path: string, options: { ifMatch?: string; ifNoneMatch?: string }): Promise<RemoteResponse> {
     const headers = this.conditions(options);
     const folder = path.endsWith('/');
     headers.set('Accept', folder ? 'application/lws+json' : '*/*');
@@ -209,6 +253,7 @@ class LWS extends RemoteBase implements Remote {
         if (!Array.isArray(document.items) || new URL(document.id, pageURL).href !== url) throw new Error('Invalid LWS container.');
         for (const item of document.items) {
           const itemURL = new URL(item.id, pageURL);
+          if (this.paths.isInternal(itemURL.href)) continue;
           if (!itemURL.href.startsWith(url)) throw new Error('This server needs an opaque-URI path mapping.');
           const name = itemURL.href.slice(url.length);
           if (!name || name.replace(/\/$/, '').includes('/') || itemURL.search || itemURL.hash) throw new Error('Invalid LWS child resource.');
@@ -242,18 +287,32 @@ class LWS extends RemoteBase implements Remote {
   async put(path: string, body: XMLHttpRequestBodyInit, contentType: string,
     options: { ifMatch?: string; ifNoneMatch?: string } = {}): Promise<RemoteResponse> {
     if (path.endsWith('/')) throw new Error('Cannot PUT an LWS container.');
+    this.getFileURL(path);
+    await this.paths.load();
+    const logical = '/' + path.replace(/^\//, '');
     const url = this.getFileURL(path);
+    const exists = url ? await this.send(url, { method: 'HEAD' }) : new Response(null, { status: 404 });
+    if (exists.status === 404) {
+      if (options.ifMatch) return { statusCode: 412 };
+      return this.result(await this.paths.create(logical, body as BodyInit, contentType, this.paths.lookup(logical)));
+    }
+    if (!exists.ok) return this.result(exists);
+    if (options.ifNoneMatch === '*') return { statusCode: 412 };
     const headers = this.conditions(options);
     headers.set('Content-Type', contentType);
-    // Initial slice updates existing resources only. Creation is POST with server-assigned
-    // identifiers, so pretending PUT creates a deterministic rs.js path would lose data.
-    if (options.ifNoneMatch === '*') throw new Error('LWS resource creation requires the pending persistent path-mapping implementation.');
     return this.result(await this.send(url, { method: 'PUT', headers, body: body as BodyInit }));
   }
 
   async delete(path: string, options: { ifMatch?: string } = {}): Promise<RemoteResponse> {
     if (path.endsWith('/')) throw new Error('Cannot delete an LWS container through rs.js.');
-    return this.result(await this.send(this.getFileURL(path), { method: 'DELETE', headers: this.conditions(options) }));
+    this.getFileURL(path);
+    await this.paths.load();
+    const logical = '/' + path.replace(/^\//, '');
+    const mapped = this.paths.lookup(logical), url = this.getFileURL(path);
+    if (!url) return { statusCode: 404 };
+    const response = await this.send(url, { method: 'DELETE', headers: this.conditions(options) });
+    if (mapped && (response.ok || response.status === 404)) await this.paths.forget(logical, mapped);
+    return this.result(response);
   }
 
   static _rs_init(rs): void {
