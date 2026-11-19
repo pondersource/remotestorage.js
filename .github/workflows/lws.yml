@@ -13,6 +13,6 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm install --ignore-scripts --no-save --package-lock=false --legacy-peer-deps
+      - run: npm install --ignore-scripts --no-save --package-lock=false --legacy-peer-deps typescript@5.5.4
       - run: npm run build:js
       - run: node --test test/lws.test.mjs
