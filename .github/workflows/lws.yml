@@ -23,3 +23,13 @@ jobs:
       - run: npm install --no-save --package-lock=false --legacy-peer-deps @playwright/test@1.56.1 typescript@5.5.4
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test --config=playwright.lws.config.cjs
+      - name: Check out independent LWSD implementation
+        uses: actions/checkout@v4
+        with:
+          repository: linkedwebstorage/lwsd
+          ref: 421aaf1b52dd4478eb386b950d3c3da81b658e9b
+          path: .lwsd
+          persist-credentials: false
+      - run: npm install --prefix .lwsd --ignore-scripts --no-save --no-audit --no-fund javascript-solid-server@0.0.222
+      - name: Real LWSD interoperability and browser offline sync
+        run: node scripts/run-lwsd-interop.mjs
