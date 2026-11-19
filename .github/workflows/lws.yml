@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: lws-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   lws:
     runs-on: ubuntu-24.04
@@ -15,4 +18,5 @@ jobs:
           cache: npm
       - run: npm install --ignore-scripts --no-save --package-lock=false --legacy-peer-deps typescript@5.5.4
       - run: npm run build:js
+      - run: npm run build:dev
       - run: node --test test/lws*.test.mjs
