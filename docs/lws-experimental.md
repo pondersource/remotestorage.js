@@ -103,3 +103,29 @@ LWS_IN_MEMORY=1 LWS_TEST_MODULE=../src/lws.ts node --import ./test/lws-source-lo
 
 CI runs compiled transport tests over real loopback HTTP and OpenID tests with
 signed test tokens. `node --test test/lws*.test.mjs` requires the TypeScript build.
+
+## Independent server interoperability
+
+The LWS workflow also starts **linkedwebstorage/lwsd**, pinned at
+`421aaf1b52dd4478eb386b950d3c3da81b658e9b`, with JSS `0.0.222`. This is an
+independent LWS implementation, separate from our deterministic test fixture.
+Its anonymous-write test mode binds only to `127.0.0.1` and uses a disposable
+data directory. Nothing is deployed publicly.
+
+The runner waits for discovery to respond, runs CRUD/conditional-write and
+concurrent-writer checks, and then runs the actual rs.js browser cache journey
+against that server (create, offline edit, reconnect, a fresh browser's pull,
+reload, delete). It stops the server and removes its temporary data afterwards.
+
+To reproduce after building rs.js and installing Playwright Chromium:
+
+```sh
+git clone https://github.com/linkedwebstorage/lwsd.git .lwsd
+git -C .lwsd checkout 421aaf1b52dd4478eb386b950d3c3da81b658e9b
+npm install --prefix .lwsd --ignore-scripts --no-save javascript-solid-server@0.0.222
+npm run test:lws:interop
+```
+
+This open-mode target exercises storage and browser/CORS interoperability. It
+does not establish real-provider OpenID interoperability; the signed-token and
+PKCE tests cover that flow separately with controlled identity responses.
