@@ -1,5 +1,5 @@
 const http = require('node:http');
-exports.createServer = async function createServer() {
+exports.createServer = async function createServer({ rootPath = '/root' } = {}) {
   const resources = new Map(), requests = [];
   let sequence = 0, revision = 0, base;
   const handler = async (req, res) => {
@@ -12,9 +12,9 @@ exports.createServer = async function createServer() {
       res.end(method === 'HEAD' ? '' : value);
     };
     if (method === 'OPTIONS') return reply(204, '', { 'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,DELETE,OPTIONS', 'Access-Control-Allow-Headers': 'Authorization,Content-Type,If-Match,If-None-Match,Slug' });
-    if (url.pathname === '/storage') return reply(200, JSON.stringify({ id: base + '/storage', type: 'Storage', service: [{ type: 'StorageRoot', serviceEndpoint: base + '/root' }] }), { 'Content-Type': 'application/lws+cid' });
-    if (url.pathname === '/root') {
-      if (method === 'GET') return reply(200, JSON.stringify({ id: base + '/root', type: 'Container', items: [...resources].map(([id, r]) => ({ id, type: 'DataResource', format: r.type, size: Buffer.byteLength(r.body) })) }), { 'Content-Type': 'application/lws+json', ETag: '"root-' + revision + '"' });
+    if (url.pathname === '/storage') return reply(200, JSON.stringify({ id: base + '/storage', type: 'Storage', service: [{ type: 'StorageRoot', serviceEndpoint: base + rootPath }] }), { 'Content-Type': 'application/lws+cid' });
+    if (url.pathname === rootPath) {
+      if (method === 'GET') return reply(200, JSON.stringify({ id: base + rootPath, type: 'Container', items: [...resources].map(([id, r]) => ({ id, type: 'DataResource', format: r.type, size: Buffer.byteLength(r.body) })) }), { 'Content-Type': 'application/lws+json', ETag: '"root-' + revision + '"' });
       if (method === 'POST') {
         const path = '/objects/' + (++sequence);
         const item = { body, type: req.headers['content-type'], revision: ++revision };
