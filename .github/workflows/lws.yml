@@ -20,3 +20,6 @@ jobs:
       - run: npm run build:js
       - run: npm run build:dev
       - run: node --test test/lws*.test.mjs
+      - run: npm install --no-save --package-lock=false --legacy-peer-deps @playwright/test@1.56.1 typescript@5.5.4
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --config=playwright.lws.config.cjs
