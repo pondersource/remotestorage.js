@@ -44,17 +44,17 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 25
-          cache: maven
       - uses: actions/checkout@v4
         with:
           repository: ebremer/lws-server
           ref: 97e8ace5f7b0da890b4f8cd96eadec505e1fb16e
           path: .lws-server
           persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
       - run: mvn -B -q -f .lws-server/pom.xml -Dmaven.test.skip=true package
       - run: npm install --ignore-scripts --no-save --package-lock=false --legacy-peer-deps typescript@5.5.4 @playwright/test@1.56.1
       - run: npm run build:js
