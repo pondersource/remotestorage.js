@@ -11,7 +11,7 @@ type LWSCredentialProvider = (context: {
   storage: string; authorizationServer: string; metadata: any; interactive?: boolean;
 }) => Promise<{ token: string; type: string }>;
 
-/** Experimental adapter for LWS servers preserving hierarchical resource names.
+/** Experimental adapter for LWS, with an rs.js index for server-assigned names.
  * Identity credentials are obtained through an application-supplied provider;
  * Solid-OIDC access tokens must not be reused as LWS access tokens.
  */
@@ -141,6 +141,7 @@ class LWS extends RemoteBase implements Remote {
   async connect(): Promise<void> {
     if (this.rs.remote.connected) throw new Error('Disconnect the current storage before connecting LWS.');
     if (!this.storageURL) throw new Error('Enter an LWS storage URL.');
+    if (this.openID) this.openID.cancelPending();
     this.token = undefined;
     this.expires = 0;
     const generation = ++this.generation;
@@ -254,7 +255,9 @@ class LWS extends RemoteBase implements Remote {
         for (const item of document.items) {
           const itemURL = new URL(item.id, pageURL);
           if (this.paths.isInternal(itemURL.href)) continue;
-          if (!itemURL.href.startsWith(url)) throw new Error('This server needs an opaque-URI path mapping.');
+          // Opaque IDs belonging to other apps have no rs.js filename. Preserve
+          // them without projecting them into our namespace.
+          if (!itemURL.href.startsWith(url)) continue;
           const name = itemURL.href.slice(url.length);
           if (!name || name.replace(/\/$/, '').includes('/') || itemURL.search || itemURL.hash) throw new Error('Invalid LWS child resource.');
           // Container item metadata need not contain an ETag. HEAD obtains a real validator.
