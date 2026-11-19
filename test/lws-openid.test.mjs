@@ -69,6 +69,24 @@ test('unrelated OAuth responses are ignored without consuming pending state', as
   assert.equal(f.calls.filter(c => c.url.endsWith('/token')).length, 0);
 });
 
+test('the existing OAuth handler leaves an LWS callback to its own verifier', async t => {
+  const f = await fixture(t); await assert.rejects(f.openid().get(context));
+  const url = f.callback();
+  const imported = await import('../build/authorize.js');
+  const Authorize = imported.default.default || imported.default;
+  const oldGet = Authorize.getLocation, oldSet = Authorize.setLocation;
+  const location = new URL(url);
+  Authorize.getLocation = () => location;
+  Authorize.setLocation = () => { throw new Error('The legacy OAuth handler consumed the LWS callback.'); };
+  t.after(() => { Authorize.getLocation = oldGet; Authorize.setLocation = oldSet; });
+  let loaded, waiting = false;
+  Authorize._rs_init({ on(name, handler) { assert.equal(name, 'features-loaded'); loaded = handler; }, remote: { stopWaitingForToken() { waiting = true; } } });
+  loaded();
+  assert.equal(waiting, true);
+  assert.equal(location.hash, '');
+  assert.equal(f.values.size, 1);
+});
+
 for (const [name, overrides] of Object.entries({
   nonce: { claims: { nonce: 'wrong' } }, issuer: { claims: { iss: 'https://evil.example' } },
   audience: { claims: { aud: 'another-client' } }, client: { claims: { azp: 'another-client' } },
@@ -77,4 +95,5 @@ for (const [name, overrides] of Object.entries({
   const f = await fixture(t, overrides); await assert.rejects(f.openid().get(context));
   await assert.rejects(f.openid().handleIncomingRedirect(f.callback()));
   assert.equal(f.values.size, 0);
+  assert.equal(f.current, redirectUri);
 });
