@@ -53,7 +53,8 @@ class LWS extends RemoteBase implements Remote {
   configureOpenID(options: ConstructorParameters<typeof LWSOpenID>[0]): void {
     if (this.openID) this.openID.clear();
     this.openID = new LWSOpenID(options);
-    this.setCredentialProvider(context => this.openID.get({ ...context, storageURL: this.storageURL }));
+    this.setCredentialProvider(context => this.openID.get({ storage: context.storage,
+      authorizationServer: context.authorizationServer, storageURL: this.storageURL, interactive: context.interactive }));
   }
 
   async handleIncomingRedirect(): Promise<boolean> {
@@ -154,6 +155,13 @@ class LWS extends RemoteBase implements Remote {
     this.connected = true;
     this.online = true;
     this.paths = new LWSPathMap(discovery.storage, discovery.root, this.send.bind(this));
+    try {
+      await this.paths.load();
+      if (generation !== this.generation) throw new Error('LWS connection was cancelled.');
+    } catch (error) {
+      this.connected = false; this.token = undefined; this.paths = undefined;
+      throw error;
+    }
     this.rs.setBackend('lws');
     if (this.rs.remote !== this) {
       this.rs._lwsPreviousRemote = this.rs.remote;
