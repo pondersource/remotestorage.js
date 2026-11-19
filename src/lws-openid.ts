@@ -25,6 +25,14 @@ class LWSOpenID {
   }
 
   private async library() { return import('oauth4webapi'); }
+  static isRedirect(url: string): boolean {
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(KEY));
+      const current = new URL(url), redirect = new URL(pending.redirectUri);
+      return !!pending.state && current.origin === redirect.origin && current.pathname === redirect.pathname &&
+        current.searchParams.get('state') === pending.state;
+    } catch { return false; }
+  }
   private async metadata(oauth: typeof import('oauth4webapi')) {
     const issuer = webURL(this.options.issuer);
     const insecure = issuer.protocol === 'http:';
@@ -42,6 +50,7 @@ class LWSOpenID {
   }
 
   async get(context: Context): Promise<{ token: string; type: string }> {
+    const epoch = this.epoch;
     if (this.credential && this.credential.expires > Date.now() + 5000 &&
       this.credential.context.storage === context.storage && this.credential.context.authorizationServer === context.authorizationServer) {
       return { token: this.credential.token, type: TYPE };
@@ -50,6 +59,7 @@ class LWSOpenID {
     const oauth = await this.library(), { as } = await this.metadata(oauth);
     const verifier = oauth.generateRandomCodeVerifier(), nonce = oauth.generateRandomNonce(), state = oauth.generateRandomState();
     const challenge = await oauth.calculatePKCECodeChallenge(verifier);
+    if (epoch !== this.epoch) throw new Error('LWS sign-in was cancelled.');
     const url = new URL(as.authorization_endpoint);
     const parameters = { client_id: this.options.clientId, redirect_uri: this.options.redirectUri, response_type: 'code',
       scope: 'openid', code_challenge: challenge, code_challenge_method: 'S256', nonce, state, resource: context.authorizationServer };
@@ -93,7 +103,8 @@ class LWSOpenID {
     return pending.context;
   }
 
-  clear(): void { this.epoch++; this.credential = undefined; sessionStorage.removeItem(KEY); }
+  cancelPending(): void { this.epoch++; sessionStorage.removeItem(KEY); }
+  clear(): void { this.cancelPending(); this.credential = undefined; }
 }
 
 export = LWSOpenID;
