@@ -23,6 +23,10 @@ issue credentials accepted by the storage authorization server. The storage URL
 cannot tell us an arbitrary user's identity provider or register our app there.
 Configuration is supplied by the application, not inferred from a WebID.
 
+Alternatively, supply the same configuration as `lwsOpenID` in the existing
+widget's options. The widget configures OpenID and finishes a pending callback
+when attached; do not also configure/resume it separately in application code.
+
 Applications with another authentication suite can provide their own credential:
 
 ```js
