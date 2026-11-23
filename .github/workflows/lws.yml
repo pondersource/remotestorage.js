@@ -36,6 +36,7 @@ jobs:
         continue-on-error: true
         run: node scripts/run-lwsd-interop.mjs
   transactional-server:
+    name: Patched transactional LWS server
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +55,12 @@ jobs:
           distribution: temurin
           java-version: 25
           cache: maven
-      - run: mvn -B -q -f .lws-server/pom.xml -Dmaven.test.skip=true package
+      - name: Apply reviewed provider source fixes to the pinned upstream revision
+        run: |
+          git -C .lws-server apply --check ../test/fixtures/lws-server/read-lifetimes.patch
+          git -C .lws-server apply ../test/fixtures/lws-server/read-lifetimes.patch
+      - name: Verify and build the patched provider, including its regression tests
+        run: mvn -B -q -f .lws-server/pom.xml verify
       - run: npm ci --ignore-scripts
       - run: npm run build:js
       - run: npm run build:all

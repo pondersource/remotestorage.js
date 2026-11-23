@@ -118,9 +118,11 @@ signed test tokens. `node --test test/lws*.test.mjs` requires the TypeScript bui
 
 ## Independent server interoperability
 
-The required independent-server job builds **ebremer/lws-server** at
-`97e8ace5f7b0da890b4f8cd96eadec505e1fb16e` with JDK 25 and its transactional
-TDB2 backend. It runs in open test mode on loopback with temporary data and
+The required independent-server job builds **ebremer/lws-server** from
+`97e8ace5f7b0da890b4f8cd96eadec505e1fb16e` with the reviewed
+[provider source patch](https://github.com/pondersource/remotestorage.js/tree/distribution/test/fixtures/lws-server), JDK 25 and its
+transactional TDB2 backend. It runs the full provider Maven verification before
+the SDK contract. It runs in open test mode on loopback with temporary data and
 allows CORS only for the test app origin. Run the same harness with
 `LWS_SERVER_KIND=ebremer` and a built checkout at `.lws-server/`.
 
@@ -142,9 +144,13 @@ A local run on 2026-11-23 also exposed an independent race in that pinned Java
 server: the concurrent-writer test received HTTP 500 with `NoSuchFileException`
 when an index reader tried to open a blob retired by another write. Its metadata
 transaction does not by itself protect the old blob's lifetime. Both browser
-recovery cases passed against it, but the host race must be fixed before this
-pin is treated as a safe writable target. The required check remains blocking;
-the adapter does not conceal the failure with unconditional writes or retries.
+recovery cases passed against it. The checked-in provider patch now pins response
+blob versions until their last reader closes and preserves non-RDF Content-Type
+parameters. Nine deterministic provider regressions cover those changes; the
+actual patched-host run passed both CRUD/concurrency cases and all three browser
+cases. These results apply to the explicitly patched fixture. The unmodified
+upstream revision still needs the fix; the adapter does not conceal its failure
+with unconditional writes or retries.
 
 The runner waits for discovery to respond, runs CRUD/conditional-write and
 concurrent-writer checks, and then runs the actual rs.js browser cache journey
