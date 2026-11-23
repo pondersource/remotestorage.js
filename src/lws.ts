@@ -212,7 +212,7 @@ class LWS extends RemoteBase implements Remote {
     if (this.token) { headers.set('Authorization', 'Bearer ' + this.token); }
     try {
       const response = await this.request(url, { ...init, headers, credentials: 'omit', redirect: 'error',
-        referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(15000) });
+        cache: 'no-store', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(15000) });
       if (generation !== this.generation) { throw new Error('LWS connection was cancelled.'); }
       this.online = true;
       return response;

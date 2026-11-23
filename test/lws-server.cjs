@@ -26,7 +26,7 @@ exports.createServer = async function createServer({ rootPath = '/root' } = {}) 
     if (!item) return reply(404);
     const etag = '"' + item.revision + '"';
     if (req.headers['if-match'] && req.headers['if-match'] !== etag) return reply(412);
-    if (req.headers['if-none-match'] === '*' || req.headers['if-none-match'] === etag) return reply(method === 'GET' ? 304 : 412);
+    if (req.headers['if-none-match'] === '*' || req.headers['if-none-match'] === etag) return reply(['GET', 'HEAD'].includes(method) ? 304 : 412);
     if (method === 'GET' || method === 'HEAD') return reply(200, item.body, { 'Content-Type': item.type, ETag: etag });
     if (method === 'PUT') { item.body = body; item.type = req.headers['content-type']; item.revision = ++revision; return reply(204, '', { ETag: '"' + item.revision + '"' }); }
     if (method === 'DELETE') { resources.delete(url.href); revision++; return reply(204); }

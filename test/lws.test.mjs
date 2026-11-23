@@ -81,6 +81,29 @@ test('conditional writes and deletes preserve preconditions and status codes', a
   assert.equal((await backend.put('/new', 'new', 'text/plain', { ifMatch: 'old' })).statusCode, 412);
 });
 
+test('rs.js validators are independent of the browser HTTP cache', async () => {
+  const { backend, routes, calls } = fixture(); await backend.connect();
+  const start = calls.length;
+  routes.set(root + 'a', options => {
+    assert.equal(options.cache, 'no-store');
+    if (options.method === 'HEAD') {
+      assert.equal(options.headers.has('If-None-Match'), false);
+      return response(null, 200, { ETag: '"old"' });
+    }
+    if (options.method) {
+      assert.equal(options.headers.get('If-Match'), '"old"');
+      return response(null, 204);
+    }
+    assert.equal(options.headers.get('If-None-Match'), '"old"');
+    return response(null, 304, { ETag: '"old"' });
+  });
+  assert.equal((await backend.get('/a', { ifNoneMatch: 'old' })).statusCode, 304);
+  assert.equal((await backend.put('/a', 'new', 'text/plain', { ifMatch: 'old' })).statusCode, 204);
+  assert.equal((await backend.delete('/a', { ifMatch: 'old' })).statusCode, 204);
+  assert.ok(calls.length > start);
+  for (const call of calls.slice(start)) assert.equal(call.options.cache, 'no-store');
+});
+
 test('lists paginated containers using real member ETags', async () => {
   const { backend, routes } = fixture(); await backend.connect();
   routes.set(root, () => response({ id: root, type: 'Container', items: [{ id: root + 'a', type: 'DataResource', format: 'text/plain' }] }, 200, { Link: '<' + root + '?page=2>; rel="next"' }));

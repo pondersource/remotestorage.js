@@ -83,7 +83,9 @@ function hasNoRemoteChanges (node: RSNode): boolean {
     return false;
   }
   return (node.common.body === undefined && node.remote.body === false) ||
-         (equal(node.remote.body, node.common.body) &&
+         // A nonempty, unfetched revision has no body. Two unknown bodies are
+         // not evidence of equality: keep that marker for the next fetch.
+         ((!node.remote.revision || node.remote.body !== undefined) && equal(node.remote.body, node.common.body) &&
           node.remote.contentType === node.common.contentType);
 }
 

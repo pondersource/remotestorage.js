@@ -83,6 +83,15 @@ deleted when a commit response might have been lost. POST is never blindly
 retried. Unknown opaque resources from other apps are preserved and omitted
 from rs.js listings; existing hierarchical native files remain readable.
 
+Server visibility is not a client acknowledgement. If the first creation's
+response is lost after the index commit, a later create-only retry receives
+412. Sync fetches the unknown remote version and emits the normal conflict
+event with both candidate bodies and an unknown last-common value. The default
+cache view adopts the remote candidate; an application can retain the local
+candidate from that event and explicitly write it back against the reviewed
+remote validator. The adapter does not silently overwrite an unknown file or
+loop through create attempts without fetching it.
+
 Only the original storage address persists in localStorage. The single-use
 OpenID state/verifier live in sessionStorage across the redirect and expire
 after ten minutes. ID Tokens and LWS access tokens remain in memory.
@@ -91,6 +100,9 @@ Discovery and authenticated requests omit browser cookies, reject redirects and
 use timeouts. Cross-origin roots, metadata and token endpoints are rejected by
 this initial implementation. CORS must expose Link, WWW-Authenticate and ETag.
 Do not put credentials or tokens in localStorage, logs or widget form fields.
+Storage requests bypass the browser HTTP cache, so only rs.js supplies the
+conditional validators; a cached GET cannot add a hidden condition to a HEAD
+probe before a write.
 
 References: https://www.w3.org/TR/lws10-core/ and
 https://w3c.github.io/lws-protocol/lws10-oauth/ (drafts checked 2026-11-19).
@@ -126,10 +138,23 @@ readers and conditional writers. The unpatched target and regression stay
 visible as a non-blocking diagnostic step; they are not counted as passing
 interoperability. The transactional Java target is a required check.
 
+A local run on 2026-11-23 also exposed an independent race in that pinned Java
+server: the concurrent-writer test received HTTP 500 with `NoSuchFileException`
+when an index reader tried to open a blob retired by another write. Its metadata
+transaction does not by itself protect the old blob's lifetime. Both browser
+recovery cases passed against it, but the host race must be fixed before this
+pin is treated as a safe writable target. The required check remains blocking;
+the adapter does not conceal the failure with unconditional writes or retries.
+
 The runner waits for discovery to respond, runs CRUD/conditional-write and
 concurrent-writer checks, and then runs the actual rs.js browser cache journey
 against that server (create, offline edit, reconnect, a fresh browser's pull,
-reload, delete). It stops the server and removes its temporary data afterwards.
+reload, delete). The offline journey waits for the initial cached write to be
+acknowledged before disconnecting. A separate browser case deliberately loses
+the first index-commit response, verifies both conflict candidates and an
+explicit keep-local decision, and checks that create attempts remain bounded.
+Failure diagnostics include cache state, errors and bounded sync/request traces.
+The runner stops the server and removes its temporary data afterwards.
 
 To reproduce after building rs.js and installing Playwright Chromium:
 
