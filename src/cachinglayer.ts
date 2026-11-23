@@ -31,14 +31,18 @@ function getLatest (node: RSNode): RSItem {
     }
   } else {
     if (node.local) {
-      if (node.local.body && node.local.contentType) {
+      if (node.local.body !== undefined && node.local.body !== false && node.local.contentType) {
         return node.local;
       }
       if (node.local.body === false) {
         return;
       }
     }
-    if (node.common && node.common.body && node.common.contentType) {
+    if (node.push) {
+      if (node.push.body !== undefined && node.push.body !== false && node.push.contentType) { return node.push; }
+      if (node.push.body === false) { return; }
+    }
+    if (node.common && node.common.body !== undefined && node.common.body !== false && node.common.contentType) {
       return node.common;
     }
   }
@@ -107,6 +111,8 @@ function updateFolderNodeWithItemName (node: RSNode, itemName: string): RSNode {
  */
 
 abstract class CachingLayer {
+  /** Shared persistent cache identity, used for short cross-tab transactions. */
+  readonly sharedCacheId?: string;
   // FIXME
   // this process of updating nodes needs to be heavily documented first, then
   // refactored. Right now it's almost impossible to refactor as there's no
@@ -158,7 +164,7 @@ abstract class CachingLayer {
           } else if (item) {
             return {
               statusCode: 200,
-              body: item.body || item.itemsMap,
+              body: item.body !== undefined && item.body !== false ? item.body : item.itemsMap,
               contentType: stripLegacyCharsetBinary(item.contentType || null)
             };
           } else {
@@ -181,7 +187,7 @@ abstract class CachingLayer {
             }
             return {
               statusCode: 200,
-              body: item.body || item.itemsMap,
+              body: item.body !== undefined && item.body !== false ? item.body : item.itemsMap,
               contentType: stripLegacyCharsetBinary(item.contentType || null)
             };
           } else {

@@ -65,6 +65,15 @@ const fileBodies = async (path = '/notes/a.txt') => {
   const file = await fetch(url);
   return file.status === 404 ? [] : [await file.text()];
 };
+async function replacePhysicalFile(path, body) {
+  const rootURL = external || storage.base + '/root';
+  const root = await (await fetch(rootURL, { headers: { Accept: 'application/lws+json' } })).json();
+  const index = root.items.find(item => item.format?.split(';')[0] === 'application/vnd.remotestorage.lws-index+json');
+  const map = await (await fetch(new URL(index.id, rootURL))).json();
+  const url = map.entries[path], head = await fetch(url, { method: 'HEAD' });
+  const response = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'text/plain', 'If-Match': head.headers.get('etag') }, body });
+  expect([200, 204]).toContain(response.status);
+}
 async function acknowledged(page, path, body) {
   // Server visibility can precede the client's acknowledgement, particularly
   // while a newly created opaque resource is being committed to the index.
@@ -135,6 +144,9 @@ test('a lost creation acknowledgement exposes both conflict candidates without r
   await page.evaluate(() => rs.stopSync());
   await context.setOffline(true);
   await page.evaluate(() => notes.storeFile('text/plain', 'uncertain.txt', 'edited while offline'));
+  // Make this a genuine conflict, rather than the now-provable acknowledgement
+  // of the exact immutable candidate that this client already sent.
+  await replacePhysicalFile('/notes/uncertain.txt', 'foreign revision');
   await page.evaluate(() => window.interruptAcknowledgement());
   await page.waitForFunction(() => window.errors.length > 0 && !Object.keys(rs.sync._running).length);
   expect(await page.evaluate(async () => (await notes.getFile('uncertain.txt', false)).data)).toBe('edited while offline');
@@ -144,14 +156,17 @@ test('a lost creation acknowledgement exposes both conflict candidates without r
   await expect.poll(() => page.evaluate(() => window.conflicts.length)).toBe(1);
   const conflict = await page.evaluate(() => window.conflicts[0]);
   expect(conflict.oldValue).toBe('edited while offline');
-  expect(conflict.newValue).toBe('first revision');
+  expect(conflict.newValue).toBe('foreign revision');
   expect(conflict.lastCommonValue).toBeUndefined();
-  expect(await page.evaluate(() => ({ puts: window.putAttempts, gets: window.getAttempts }))).toEqual({ puts: 2, gets: 1 });
-  expect(await fileBodies('/notes/uncertain.txt')).toEqual(['first revision']);
+  expect(await page.evaluate(() => ({ puts: window.putAttempts, gets: window.getAttempts }))).toEqual({ puts: 1, gets: 1 });
+  expect(await fileBodies('/notes/uncertain.txt')).toEqual(['foreign revision']);
 
   // rs.js exposes the two versions; only an explicit application decision
   // writes its chosen candidate back with the reviewed remote validator.
-  await page.evaluate(() => notes.storeFile('text/plain', 'uncertain.txt', window.conflicts[0].oldValue));
+  await page.evaluate(async () => {
+    const node = (await rs.sync.listInterruptedWrites()).find(node => node.path === '/notes/uncertain.txt');
+    await rs.sync.resolveInterruptedWrite(node.path, node.push.operation.id, 'local');
+  });
   await expect.poll(() => fileBodies('/notes/uncertain.txt'), { timeout: 20000 }).toEqual(['edited while offline']);
   await acknowledged(page, '/notes/uncertain.txt', 'edited while offline');
   await page.evaluate(() => notes.remove('uncertain.txt'));
@@ -194,4 +209,238 @@ test('JSON edits survive revalidation after an acknowledgement without an ETag',
   } finally { await fresh.close(); }
   await page.evaluate(() => notes.remove('etagless.json'));
   await expect.poll(() => fileBodies('/notes/etagless.json'), { timeout: 20000 }).toEqual([]);
+});
+
+async function holdCommittedEdit(page, path, body) {
+  await page.evaluate(async ({ path, body }) => {
+    const url = rs.lws.getFileURL(path), request = rs.lws.request;
+    window.committedEdit = false;
+    rs.lws.request = async (target, init) => {
+      const response = await request(target, init);
+      if (target === url && init?.method === 'PUT' && response.ok) {
+        window.committedEdit = true;
+        await new Promise(resolve => { window.releaseEdit = resolve; });
+      }
+      return response;
+    };
+    await notes.storeFile('text/plain', path.slice('/notes/'.length), body);
+  }, { path, body });
+  await page.waitForFunction(() => window.committedEdit);
+  await expect.poll(() => page.evaluate(async ({ path }) => {
+    const node = (await rs.local.getNodesFromDb([path]))[path];
+    return node?.push?.body;
+  }, { path })).toBe(body);
+}
+
+test('a reload confirms an already committed push without resending it or losing its IndexedDB candidate', async ({ page, context }) => {
+  const path = '/notes/reload.txt';
+  await connect(page);
+  await page.evaluate(() => notes.storeFile('text/plain', 'reload.txt', 'base'));
+  await acknowledged(page, path, 'base');
+  const url = await page.evaluate(path => rs.lws.getFileURL(path), path);
+  const mutations = [];
+  context.on('request', request => { if (request.url() === url && request.method() === 'PUT') mutations.push(request); });
+  await holdCommittedEdit(page, path, 'committed before reload');
+  expect(mutations).toHaveLength(1);
+  await page.reload(); await page.waitForFunction(() => window.ready === true);
+  await page.evaluate(() => window.connectStorage());
+  await expect.poll(() => page.evaluate(async path => {
+    const node = (await rs.local.getNodesFromDb([path]))[path];
+    return node?.common?.body === 'committed before reload' && !node.local && !node.push;
+  }, path), { timeout: 10000 }).toBe(true);
+  expect(mutations).toHaveLength(1);
+  expect(await page.evaluate(() => window.conflicts)).toEqual([]);
+  expect(await page.evaluate(async () => (await notes.getFile('reload.txt', false)).data)).toBe('committed before reload');
+  await page.evaluate(() => notes.remove('reload.txt'));
+  await expect.poll(() => fileBodies(path)).toEqual([]);
+});
+
+test('another live tab cannot steal a pending IndexedDB push or acknowledge it with a replacement snapshot', async ({ page, context }) => {
+  const path = '/notes/live-owner.txt';
+  await connect(page);
+  await page.evaluate(() => notes.storeFile('text/plain', 'live-owner.txt', 'base'));
+  await acknowledged(page, path, 'base');
+  const url = await page.evaluate(path => rs.lws.getFileURL(path), path);
+  const mutations = [];
+  context.on('request', request => { if (request.url() === url && request.method() === 'PUT') mutations.push(request); });
+  await holdCommittedEdit(page, path, 'live owner candidate');
+  const other = await context.newPage();
+  try {
+    await connect(other);
+    await other.evaluate(() => { window.readStarted = true; window.pendingRead = notes.getFile('live-owner.txt', 0); });
+    await expect.poll(() => other.evaluate(async () => {
+      const locks = await navigator.locks.query();
+      return locks.held.some(lock => lock.name.includes('live-owner.txt')) && locks.pending.some(lock => lock.name.includes('live-owner.txt'));
+    }), { timeout: 3000 }).toBe(true);
+    expect(mutations).toHaveLength(1);
+    expect(await other.evaluate(async path => (await rs.local.getNodesFromDb([path]))[path].push.body, path)).toBe('live owner candidate');
+    await page.evaluate(() => window.releaseEdit());
+    await acknowledged(page, path, 'live owner candidate');
+    expect(await other.evaluate(async () => (await window.pendingRead).data)).toBe('live owner candidate');
+    expect(await other.evaluate(() => window.conflicts)).toEqual([]);
+  } finally { await other.close(); }
+  await page.evaluate(() => notes.remove('live-owner.txt'));
+  await expect.poll(() => fileBodies(path)).toEqual([]);
+});
+
+async function holdUnsentEdit(page, path, body) {
+  await page.evaluate(async ({ path, body }) => {
+    const url = rs.lws.getFileURL(path), request = rs.lws.request;
+    window.unsentEdit = false;
+    rs.lws.request = async (target, init) => {
+      if (target === url && init?.method === 'PUT') {
+        window.unsentEdit = true;
+        await new Promise(() => {});
+      }
+      return request(target, init);
+    };
+    await notes.storeFile('text/plain', path.slice('/notes/'.length), body);
+  }, { path, body });
+  await page.waitForFunction(() => window.unsentEdit);
+}
+
+test('a dead owner reads the unchanged base before conditionally sending the newest local edit', async ({ page, context }) => {
+  const path = '/notes/not-sent.txt'; await connect(page);
+  await page.evaluate(() => notes.storeFile('text/plain', 'not-sent.txt', 'base'));
+  await acknowledged(page, path, 'base');
+  const before = await page.evaluate(async path => ({ url: rs.lws.getFileURL(path), revision: (await rs.local.getNodes([path]))[path].common.revision }), path);
+  const requests = [];
+  context.on('request', request => { if (request.url() === before.url && ['GET', 'PUT'].includes(request.method())) requests.push(request); });
+  await holdUnsentEdit(page, path, 'first unsent edit');
+  // A local edit must not wait for the held network operation or replace its snapshot.
+  await page.evaluate(() => notes.storeFile('text/plain', 'not-sent.txt', 'newest edit'));
+  expect(await page.evaluate(async path => (await rs.local.getNodesFromDb([path]))[path].push.body, path)).toBe('first unsent edit');
+  await page.reload(); await page.waitForFunction(() => window.ready === true);
+  await page.evaluate(() => window.connectStorage());
+  await acknowledged(page, path, 'newest edit');
+  expect(requests[0].method()).toBe('GET');
+  const puts = requests.filter(request => request.method() === 'PUT');
+  expect(puts).toHaveLength(1);
+  expect(puts[0].headers()['if-match']).toBe('"' + before.revision + '"');
+  expect(puts[0].postData()).toBe('newest edit');
+  expect(await page.evaluate(() => window.conflicts)).toEqual([]);
+  await page.evaluate(() => notes.remove('not-sent.txt'));
+  await expect.poll(() => fileBodies(path)).toEqual([]);
+});
+
+for (const foreign of ['', 'foreign writer']) test('differing readback stays a durable reviewed conflict after reload: ' + JSON.stringify(foreign), async ({ page, context }) => {
+  const path = '/notes/review.txt'; await connect(page);
+  await page.evaluate(() => notes.storeFile('text/plain', 'review.txt', 'base'));
+  await acknowledged(page, path, 'base');
+  const url = await page.evaluate(path => rs.lws.getFileURL(path), path);
+  const mutations = [];
+  context.on('request', request => { if (request.url() === url && request.method() === 'PUT') mutations.push(request); });
+  await holdUnsentEdit(page, path, 'retained candidate');
+  const head = await fetch(url, { method: 'HEAD' });
+  const changed = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'text/plain', 'If-Match': head.headers.get('etag') }, body: foreign });
+  expect([200, 204]).toContain(changed.status);
+  await page.reload(); await page.waitForFunction(() => window.ready === true); await page.evaluate(() => window.connectStorage());
+  await expect.poll(() => page.evaluate(() => window.conflicts.length)).toBe(1);
+  let retained = await page.evaluate(async path => (await rs.sync.listInterruptedWrites()).find(node => node.path === path), path);
+  expect(retained.push.body).toBe('retained candidate');
+  expect(retained.push.operation.base.body).toBe('base');
+  expect(retained.push.operation.observed.body).toBe(foreign);
+  expect(mutations).toHaveLength(0);
+  // A second document must re-expose both candidates without guessing a winner.
+  await page.reload(); await page.waitForFunction(() => window.ready === true); await page.evaluate(() => window.connectStorage());
+  await expect.poll(() => page.evaluate(() => window.conflicts.length)).toBe(1);
+  expect(await page.evaluate(() => window.conflicts[0])).toMatchObject({ oldValue: 'retained candidate', newValue: foreign, lastCommonValue: 'base' });
+  expect(mutations).toHaveLength(0);
+  retained = await page.evaluate(async path => (await rs.sync.listInterruptedWrites()).find(node => node.path === path), path);
+  expect(await page.evaluate(async ({ path, id }) => rs.sync.retryInterruptedWrite(path, id).then(() => 'unexpected-success', error => error.code),
+    { path, id: retained.push.operation.id })).toBe('interrupted-write');
+  expect(mutations).toHaveLength(0);
+  if (foreign !== '') {
+    const name = await page.evaluate(({ path, destination }) => 'remotestorage:write:' + JSON.stringify([rs.local.sharedCacheId, destination, path]),
+      { path, destination: retained.push.operation.destination });
+    const holder = await context.newPage();
+    try {
+      await holder.goto(address); await holder.waitForFunction(() => window.ready === true);
+      await holder.evaluate(name => { navigator.locks.request(name, () => new Promise(resolve => { window.releaseReview = resolve; window.reviewHeld = true; })); }, name);
+      await holder.waitForFunction(() => window.reviewHeld);
+      await page.evaluate(({ path, id }) => {
+        window.resolution = rs.sync.resolveInterruptedWrite(path, id, 'remote').then(() => { window.selectionSucceeded = true; }, error => { window.selectionError = error.message; });
+      }, { path, id: retained.push.operation.id });
+      await expect.poll(() => page.evaluate(async name => (await navigator.locks.query()).pending.some(lock => lock.name === name), name)).toBe(true);
+      await page.evaluate(() => notes.storeFile('text/plain', 'review.txt', 'newer edit while waiting'));
+      await holder.evaluate(() => window.releaseReview());
+      await page.evaluate(() => window.resolution);
+      expect(await page.evaluate(() => window.selectionSucceeded)).toBeUndefined();
+      expect(await page.evaluate(() => window.selectionError)).toContain('needs review');
+      const latest = await page.evaluate(async path => (await rs.sync.listInterruptedWrites()).find(node => node.path === path), path);
+      expect(latest.local.body).toBe('newer edit while waiting');
+      expect(latest.push.body).toBe('retained candidate');
+      expect(mutations).toHaveLength(0);
+    } finally { await holder.close(); }
+  }
+  await page.evaluate(async ({ path, id, choice }) => rs.sync.resolveInterruptedWrite(path, id, choice),
+    { path, id: retained.push.operation.id, choice: foreign === '' ? 'local' : 'remote' });
+  if (foreign === '') { await acknowledged(page, path, 'retained candidate'); expect(mutations).toHaveLength(1); }
+  else { expect((await (await fetch(url)).text())).toBe(foreign); expect(mutations).toHaveLength(0); }
+  await page.evaluate(() => notes.remove('review.txt'));
+  await expect.poll(() => fileBodies(path)).toEqual([]);
+});
+
+test('non-atomic missing creates stay parked until readback positively identifies the candidate', async ({ page, context, browser }) => {
+  const path = '/notes/non-atomic.txt'; await connect(page);
+  await page.evaluate(() => {
+    const request = rs.lws.request;
+    rs.lws.request = async (url, init) => {
+      if (init?.method === 'POST' && new Headers(init.headers).get('Content-Type') === 'text/plain') {
+        window.createHeld = true; await new Promise(() => {});
+      }
+      return request(url, init);
+    };
+    return notes.storeFile('text/plain', 'non-atomic.txt', 'candidate');
+  });
+  await page.waitForFunction(() => window.createHeld);
+  const mutations = [];
+  context.on('request', request => { if (['POST', 'PUT'].includes(request.method()) && request.url().startsWith(external || storage.base)) mutations.push(request); });
+  await page.reload(); await page.waitForFunction(() => window.ready === true);
+  await page.evaluate(() => { Object.defineProperty(rs.lws, 'supportsAtomicCreate', { value: false }); return window.connectStorage(); });
+  await expect.poll(() => page.evaluate(async path => (await rs.sync.listInterruptedWrites()).find(node => node.path === path)?.push.operation.state, path)).toBe('conflict');
+  const id = await page.evaluate(async path => (await rs.sync.listInterruptedWrites()).find(node => node.path === path).push.operation.id, path);
+  expect(await page.evaluate(async ({ path, id }) => rs.sync.resolveInterruptedWrite(path, id, 'local').then(() => 'unexpected-success', error => error.code), { path, id })).toBe('interrupted-write');
+  expect(mutations).toHaveLength(0);
+  const otherContext = await browser.newContext();
+  try {
+    const other = await otherContext.newPage(); await connect(other);
+    expect(await other.evaluate(async path => (await rs.lws.put(path, 'candidate', 'text/plain', { ifNoneMatch: '*' })).statusCode, path)).toBe(201);
+  } finally { await otherContext.close(); }
+  await page.evaluate(({ path, id }) => rs.sync.retryInterruptedWrite(path, id), { path, id });
+  await acknowledged(page, path, 'candidate'); expect(mutations).toHaveLength(0);
+  await page.evaluate(() => notes.remove('non-atomic.txt'));
+  await expect.poll(() => fileBodies(path)).toEqual([]);
+});
+
+for (const mode of ['IndexedDB', 'localStorage']) test(mode + ' retains binary pending/base snapshots, empty files and tombstones through document reload', async ({ page }) => {
+  if (mode === 'localStorage') await page.addInitScript(() => { Object.defineProperty(window, 'indexedDB', { configurable: true, value: undefined }); });
+  await page.goto(address); await page.waitForFunction(() => window.ready === true);
+  await page.evaluate(async () => {
+    rs.stopSync();
+    await rs.local.setNodes({
+      '/notes/binary': { path: '/notes/binary', common: {}, push: { body: new Uint8Array([0, 255]).buffer, contentType: 'application/octet-stream',
+        operation: { version: 1, id: 'offline-export', destination: 'offline', owned: false, base: { body: new Uint8Array([1, 2]).buffer, contentType: 'application/octet-stream' } } } },
+      '/notes/empty': { path: '/notes/empty', common: { body: '', contentType: 'text/plain' } },
+      '/notes/empty-json': { path: '/notes/empty-json', common: { body: '', contentType: 'application/json' } },
+      '/notes/deleted': { path: '/notes/deleted', common: { body: 'previous', contentType: 'text/plain' }, local: { body: false },
+        push: { body: false, operation: { version: 1, id: 'offline-delete', destination: 'offline', owned: false, base: { body: 'previous', contentType: 'text/plain' } } } },
+      '/notes/unknown': { path: '/notes/unknown', common: {} }
+    });
+  });
+  await page.reload(); await page.waitForFunction(() => window.ready === true);
+  const result = await page.evaluate(async () => {
+    const nodes = await rs.local.getNodes(['/notes/binary', '/notes/empty', '/notes/deleted', '/notes/unknown']);
+    let invalidJsonRejected = false;
+    try { await notes.getObject('empty-json', false); } catch { invalidJsonRejected = true; }
+    return { identity: rs.local.sharedCacheId, invalidJsonRejected,
+      pending: [...new Uint8Array(nodes['/notes/binary'].push.body)], base: [...new Uint8Array(nodes['/notes/binary'].push.operation.base.body)],
+      visible: [...new Uint8Array((await notes.getFile('binary', false)).data)], empty: await notes.getFile('empty', false),
+      deleted: await rs.local.get('/notes/deleted'), pendingDelete: nodes['/notes/deleted'].push.body,
+      unknownBody: Object.prototype.hasOwnProperty.call(nodes['/notes/unknown'].common, 'body') };
+  });
+  expect(result.identity.startsWith(mode === 'IndexedDB' ? 'indexeddb:' : 'localstorage:')).toBe(true);
+  expect(result.pending).toEqual([0, 255]); expect(result.base).toEqual([1, 2]); expect(result.visible).toEqual([0, 255]);
+  expect(result.empty.data).toBe(''); expect(result.invalidJsonRejected).toBe(true);
+  expect(result.deleted.statusCode).toBe(404); expect(result.pendingDelete).toBe(false); expect(result.unknownBody).toBe(false);
 });

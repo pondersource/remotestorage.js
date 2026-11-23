@@ -29,6 +29,13 @@ const json = (body, status = 200) => new Response(body === null ? null : JSON.st
 const item = 'https://graph.microsoft.com/v1.0/me/drive/items/root:/';
 
 describe('OneDrive experimental backend', function() {
+  it('binds pending-write identity to the registration, actual app-folder and account', function() {
+    const { backend } = fixture(); backend.root = 'folder-a'; backend.account = { homeAccountId: 'account-a' };
+    const original = backend.getStorageIdentity();
+    backend.root = 'folder-b'; expect(backend.getStorageIdentity()).not.to.equal(original);
+    backend.root = 'folder-a'; backend.clientId = 'different-client'; expect(backend.getStorageIdentity()).not.to.equal(original);
+    backend.clientId = 'test-client-id'; backend.account = { homeAccountId: 'account-b' }; expect(backend.getStorageIdentity()).not.to.equal(original);
+  });
   it('configures an optional registration without initializing MSAL or needing Web Crypto', async function() {
     const descriptors = ['window', 'crypto'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
     Object.defineProperty(globalThis, 'window', { configurable: true, value: { location: { origin: 'http://app:8000' } } });

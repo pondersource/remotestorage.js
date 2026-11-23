@@ -31,6 +31,8 @@ function httpURL (value: string): URL {
  * Based on the Solid adapter contributed in PR #1319.
  */
 export class Solid extends RemoteBase implements Remote {
+  readonly supportsAtomicCreate = true;
+  getStorageIdentity(): string { return JSON.stringify([this.userAddress || '', this.selectedPodURL || '']); }
   readonly folderETagsAreRecursive = false;
   readonly minRefreshInterval = 60000;
   authURL: string | null = null;

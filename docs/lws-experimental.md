@@ -1,8 +1,9 @@
 # Experimental LWS backend
 
 This branch implements an experimental LWS backend using the same feature
-registration and `Remote` contract as Solid. Real-server interoperability still
-needs to be verified before production rollout.
+registration and `Remote` contract as Solid. Controlled local widget acceptance
+and pinned independent-provider contracts are verified; each production target
+still needs its own client registration and deployment acceptance.
 
 ```js
 remoteStorage.lws.setStorageURL('https://storage.example/alice/');
@@ -57,13 +58,15 @@ Implemented:
 - POST creation using the returned Location, persisted path mapping, virtual
   folder listings, reload recovery, and CAS updates merging independent writes.
 
-Still required before deploying to Litewrite or enabling real writable sync:
+Deployment-specific configuration still required:
 
 - Configure a real identity provider/client registration and callback for the
   target deployment; test its signed ID Token with the chosen LWS authorization
   server. Multiple authorization-server selection is still unsupported.
-- End-to-end sync against a real LWS server, including create/reload/conflict,
-  deletion, token expiration, and interrupted authentication.
+- Run acceptance for the chosen deployment, including expiration/revocation and
+  interrupted authentication. Controlled local CSS-LWS widget acceptance already
+  covers native login/consent, private writes, anonymous denial and fresh-browser
+  recovery; independent-provider CRUD/conflict/delete/reload checks also run.
 
 ## Path mapping convention
 
@@ -83,16 +86,16 @@ deleted when a commit response might have been lost. POST is never blindly
 retried. Unknown opaque resources from other apps are preserved and omitted
 from rs.js listings; existing hierarchical native files remain readable.
 
-Server visibility is not a client acknowledgement. If the first creation's
-response is lost after the index commit, a later create-only retry receives
-412. Sync fetches the unknown remote version and emits the normal conflict
-event with both candidate bodies and an unknown last-common value. The default
-cache view adopts the remote candidate; an application can retain the local
-candidate from that event and explicitly write it back against the reviewed
-remote validator. The adapter does not silently overwrite an unknown file or
-loop through create attempts without fetching it.
+Server visibility is not a client acknowledgement. New owned operations retain
+their exact pending candidate and base across reload. Fresh readback can confirm
+the exact candidate without replaying its create; an unchanged base permits a
+conditional retry. A foreign or otherwise different representation stays a
+durable conflict with every candidate retained for the explicit recovery API.
+Legacy/unowned records remain readable/exportable rather than being guessed
+dead or adopted over pending bytes. The adapter never silently overwrites an
+unknown file or loops through create attempts without reviewed readback.
 
-Only the original storage address persists in localStorage. The single-use
+For connection settings, only the original storage address persists in localStorage. The single-use
 OpenID state/verifier live in sessionStorage across the redirect and expire
 after ten minutes. ID Tokens and LWS access tokens remain in memory.
 
@@ -157,8 +160,10 @@ concurrent-writer checks, and then runs the actual rs.js browser cache journey
 against that server (create, offline edit, reconnect, a fresh browser's pull,
 reload, delete). The offline journey waits for the initial cached write to be
 acknowledged before disconnecting. A separate browser case deliberately loses
-the first index-commit response, verifies both conflict candidates and an
-explicit keep-local decision, and checks that create attempts remain bounded.
+the first index-commit response while an independent writer changes the record,
+verifies the retained conflict candidates and an explicit reviewed keep-local
+decision, and checks that create attempts remain bounded. A separate reload case
+confirms an exact already-applied candidate without another mutation.
 Failure diagnostics include cache state, errors and bounded sync/request traces.
 The runner stops the server and removes its temporary data afterwards.
 
@@ -243,3 +248,7 @@ acknowledgement case still retains genuinely different conflict candidates.
 The OneDrive/Nextgraph shared record decoder follows the same text contract;
 their adapter-boundary tests exercise actual Sync cache revalidation, without
 claiming live Microsoft or wallet/broker acceptance.
+
+Document reloads and interrupted uploads use the shared
+[interrupted-write recovery](./interrupted-writes.md) ownership and review API.
+The loopback and independent-provider browser gates include these cases.

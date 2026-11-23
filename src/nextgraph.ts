@@ -64,6 +64,8 @@ interface Snapshot {
  * acknowledgement is inferred from an SDK transaction completing locally.
  */
 class NextGraph extends RemoteBase implements Remote {
+  readonly supportsAtomicCreate = false;
+  getStorageIdentity(): string { return JSON.stringify([this.session?.private_store_id || '', this.collection || '']); }
   folderETagsAreRecursive = false;
   deliveryState: 'local' | 'needs-attention' = 'local';
   requiresReload = false;

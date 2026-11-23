@@ -83,6 +83,13 @@ describe('Solid backend', () => {
     localStorage.removeItem('remotestorage:solid');
   });
 
+  it('binds write identity to the selected Pod as well as the authenticated account', () => {
+    solid.userAddress = 'https://identity.example/profile#me';
+    const original = solid.getStorageIdentity();
+    solid.selectedPodURL = 'https://other.example/pod/';
+    expect(solid.getStorageIdentity()).not.to.equal(original);
+  });
+
   it('shares only public-scope files, with failure visible to the caller', async () => {
     const share = sinon.stub(solid, 'setPublicAccess').resolves({ read: true });
     expect(await solid.getItemURL('/private/a')).to.equal(POD + 'private/a');

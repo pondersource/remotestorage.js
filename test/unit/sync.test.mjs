@@ -1135,7 +1135,7 @@ describe("Sync", function() {
       const choice = await this.rs.sync.doTask(path);
       expect(choice.action).to.equal("put");
       expect(put.calledOnceWithExactly(path, "edited while offline", "text/plain", { ifMatch: "server-revision" })).to.be.true;
-      await this.rs.sync.handleResponse(path, "put", await choice.promise);
+      await this.rs.sync.handleResponse(path, "put", await choice.promise, choice.operationId);
       node = (await this.rs.local.getNodes([path]))[path];
       expect(node.common.body).to.equal("edited while offline");
       expect(node.common.revision).to.equal("chosen-revision");

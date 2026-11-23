@@ -16,6 +16,8 @@ type LWSCredentialProvider = (context: {
  * Solid-OIDC access tokens must not be reused as LWS access tokens.
  */
 class LWS extends RemoteBase implements Remote {
+  readonly supportsAtomicCreate = true;
+  getStorageIdentity(): string { return JSON.stringify([this.discovery?.storage || this.storageURL || '', this.discovery?.root || this.href || '']); }
   href: string;
   storageURL: string;
   discovery: Discovery;

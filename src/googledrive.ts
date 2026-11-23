@@ -140,6 +140,8 @@ class FileIdCache {
  * Docs: https://developers.google.com/drive/v3/web/quickstart/js
 **/
 class GoogleDrive extends RemoteBase implements Remote {
+  readonly supportsAtomicCreate = false;
+  getStorageIdentity(): string { return JSON.stringify([this.userAddress || '', this.clientId || '', PATH_PREFIX]); }
   clientId: string;
   token: string;
 
