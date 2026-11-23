@@ -23,6 +23,10 @@ module.exports = (env = {}) => ({
   module: {
     rules: [
       {
+        test: /[/\\]@ng-org[/\\]web[/\\]dist[/\\]ngweb\.umd\.cjs$/,
+        use: path.resolve(__dirname, 'scripts/nextgraph-csp-loader.cjs'),
+      },
+      {
         test: /[/\\]solid\.ts$/,
         // Select the SDKs' ESM exports even though tsc emits require() for
         // Node. Their CommonJS bundles retain otherwise unused RDF APIs.

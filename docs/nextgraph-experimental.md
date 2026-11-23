@@ -69,3 +69,15 @@ Live acceptance still requires wallet consent, two-device offline edits,
 restart before reconnect, a fresh device, duplicate first connections, revoked
 access, interrupted import and loss/recovery of browser storage. Public links,
 large native blobs, history compaction and semantic graph mapping remain open.
+
+## Content Security Policy
+
+The all-backend bundle does not require `unsafe-eval`. The pinned web SDK embeds
+an empty `Function` subclass as an async-proxy target; constructing it would
+otherwise violate a strict app CSP during bundle evaluation. A build-only loader
+replaces that target constructor with an ordinary function. It checks the exact
+SDK file SHA-256 and expected single match, failing the build if the dependency
+changes. The package in `node_modules` is not modified, licensing is retained,
+and the bundle remains a single file. The real SDK browser protocol test runs
+both the app and simulated wallet under CSP without `unsafe-eval`. Native
+wallet/broker acceptance remains separate.
