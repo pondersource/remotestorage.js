@@ -1,0 +1,410 @@
+From 2243fb7db0981f35ae1618bd8b7fab7fe0a9bf18 Mon Sep 17 00:00:00 2001
+From: Michiel de Jong <michielbdejong@ontola.io>
+Date: Mon, 23 Nov 2026 17:44:39 +0100
+Subject: [PATCH] Announce early response connection closure for unread HTTP1
+ bodies
+
+---
+ .../com/ebremer/lws/server/JettyLauncher.java |   3 +
+ .../ebremer/lws/server/LwsServletConfig.java  |  10 ++
+ .../http/UnreadBodyConnectionFilter.java      | 116 +++++++++++++++++
+ .../server/EarlyResponseConnectionTest.java   | 117 ++++++++++++++++++
+ .../http/UnreadBodyConnectionFilterTest.java  |  90 ++++++++++++++
+ 5 files changed, 336 insertions(+)
+ create mode 100644 src/main/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilter.java
+ create mode 100644 src/test/java/com/ebremer/lws/server/EarlyResponseConnectionTest.java
+ create mode 100644 src/test/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilterTest.java
+
+diff --git a/src/main/java/com/ebremer/lws/server/JettyLauncher.java b/src/main/java/com/ebremer/lws/server/JettyLauncher.java
+index e19211b..1ed73ee 100644
+--- a/src/main/java/com/ebremer/lws/server/JettyLauncher.java
++++ b/src/main/java/com/ebremer/lws/server/JettyLauncher.java
+@@ -35,6 +35,7 @@ import com.ebremer.lws.server.http.ProtectedResourceMetadataServlet;
+ import com.ebremer.lws.server.http.SearchIndexServlet;
+ import com.ebremer.lws.server.http.StorageDescriptionServlet;
+ import com.ebremer.lws.server.http.SubscriptionServlet;
++import com.ebremer.lws.server.http.UnreadBodyConnectionFilter;
+ import com.ebremer.lws.server.oauth.AuthorizationServerMetadataServlet;
+ import com.ebremer.lws.server.oauth.TokenEndpointServlet;
+ import com.ebremer.lws.server.tls.AcmeCertificateManager;
+@@ -283,6 +284,8 @@ public final class JettyLauncher {
+         }
+ 
+         EnumSet<DispatcherType> req = EnumSet.of(DispatcherType.REQUEST);
++        // Must wrap every early gate, including TLS redirects and authentication refusals.
++        context.addFilter(new FilterHolder(new UnreadBodyConnectionFilter()), "/*", req);
+ 
+         // When the server terminates TLS itself, redirect plaintext to HTTPS (leaving the ACME
+         // challenge path on HTTP) and serve the HTTP-01 challenge. Installed before authentication.
+diff --git a/src/main/java/com/ebremer/lws/server/LwsServletConfig.java b/src/main/java/com/ebremer/lws/server/LwsServletConfig.java
+index 7e89d1b..5ce22e1 100644
+--- a/src/main/java/com/ebremer/lws/server/LwsServletConfig.java
++++ b/src/main/java/com/ebremer/lws/server/LwsServletConfig.java
+@@ -28,6 +28,7 @@ import com.ebremer.lws.server.http.ProtectedResourceMetadataServlet;
+ import com.ebremer.lws.server.http.SearchIndexServlet;
+ import com.ebremer.lws.server.http.StorageDescriptionServlet;
+ import com.ebremer.lws.server.http.SubscriptionServlet;
++import com.ebremer.lws.server.http.UnreadBodyConnectionFilter;
+ import com.ebremer.lws.server.oauth.AuthorizationServerMetadataServlet;
+ import com.ebremer.lws.server.oauth.TokenEndpointServlet;
+ import com.ebremer.lws.server.tls.HstsFilter;
+@@ -249,6 +250,15 @@ public class LwsServletConfig {
+         return bean;
+     }
+ 
++    @Bean
++    public FilterRegistrationBean<Filter> unreadBodyConnectionFilter() {
++        FilterRegistrationBean<Filter> bean = new FilterRegistrationBean<>(new UnreadBodyConnectionFilter());
++        bean.addUrlPatterns("/*");
++        bean.setOrder(-1); // before every gate that can refuse an unread upload
++        bean.setName("lwsUnreadBodyConnection");
++        return bean;
++    }
++
+     @Bean
+     public FilterRegistrationBean<Filter> authenticationFilter(LwsComponents c) {
+         FilterRegistrationBean<Filter> bean = new FilterRegistrationBean<>(c.authenticationFilter());
+diff --git a/src/main/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilter.java b/src/main/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilter.java
+new file mode 100644
+index 0000000..e17a34e
+--- /dev/null
++++ b/src/main/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilter.java
+@@ -0,0 +1,116 @@
++package com.ebremer.lws.server.http;
++
++import java.io.FilterWriter;
++import java.io.IOException;
++import java.io.PrintWriter;
++import jakarta.servlet.Filter;
++import jakarta.servlet.FilterChain;
++import jakarta.servlet.ServletException;
++import jakarta.servlet.ServletOutputStream;
++import jakarta.servlet.ServletRequest;
++import jakarta.servlet.ServletResponse;
++import jakarta.servlet.WriteListener;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import jakarta.servlet.http.HttpServletResponseWrapper;
++
++/**
++ * Announces an HTTP/1 connection close before an early response commits with unread request content.
++ * Jetty can otherwise discover the unread upload only after sending the response, close the socket,
++ * and race the client's next non-idempotent request. Authorization gates must not drain arbitrary
++ * uploads merely to keep a connection alive. HTTP/2 does not use the Connection header.
++ */
++public final class UnreadBodyConnectionFilter implements Filter {
++    @Override
++    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
++            throws IOException, ServletException {
++        HttpServletRequest request = (HttpServletRequest) req;
++        if (!request.getProtocol().startsWith("HTTP/1.")
++                || (request.getContentLengthLong() <= 0 && request.getHeader("Transfer-Encoding") == null)) {
++            chain.doFilter(req, res);
++            return;
++        }
++        ProtectedResponse response = new ProtectedResponse(request, (HttpServletResponse) res);
++        Throwable chainFailure = null;
++        try {
++            chain.doFilter(req, response);
++        } catch (IOException | ServletException | RuntimeException | Error failure) {
++            chainFailure = failure;
++            throw failure;
++        } finally {
++            // Covers empty responses and container error handling after the chain unwinds.
++            try {
++                response.beforeCommit();
++            } catch (IOException | RuntimeException | Error failure) {
++                if (chainFailure == null) throw failure;
++                if (failure != chainFailure) chainFailure.addSuppressed(failure);
++            }
++        }
++    }
++
++    private static final class ProtectedResponse extends HttpServletResponseWrapper {
++        private final HttpServletRequest request;
++        private ServletOutputStream output;
++        private PrintWriter writer;
++
++        private ProtectedResponse(HttpServletRequest request, HttpServletResponse response) {
++            super(response);
++            this.request = request;
++        }
++
++        private void beforeCommit() throws IOException {
++            if (isCommitted()) return;
++            boolean finished;
++            try {
++                finished = request.getInputStream().isFinished();
++            } catch (IllegalStateException usingReader) {
++                // A reader may own the body. Closing conservatively never drains it or loses data.
++                finished = false;
++            }
++            if (!finished) setHeader("Connection", "close");
++        }
++
++        @Override
++        public ServletOutputStream getOutputStream() throws IOException {
++            if (output == null) {
++                ServletOutputStream delegate = super.getOutputStream();
++                output = new ServletOutputStream() {
++                    @Override public boolean isReady() { return delegate.isReady(); }
++                    @Override public void setWriteListener(WriteListener listener) { delegate.setWriteListener(listener); }
++                    @Override public void write(int value) throws IOException { beforeCommit(); delegate.write(value); }
++                    @Override public void write(byte[] data, int offset, int length) throws IOException {
++                        beforeCommit(); delegate.write(data, offset, length);
++                    }
++                    @Override public void flush() throws IOException { beforeCommit(); delegate.flush(); }
++                    @Override public void close() throws IOException { beforeCommit(); delegate.close(); }
++                };
++            }
++            return output;
++        }
++
++        @Override
++        public PrintWriter getWriter() throws IOException {
++            if (writer == null) {
++                writer = new PrintWriter(new FilterWriter(super.getWriter()) {
++                    @Override public void write(int value) throws IOException { beforeCommit(); out.write(value); }
++                    @Override public void write(char[] data, int offset, int length) throws IOException {
++                        beforeCommit(); out.write(data, offset, length);
++                    }
++                    @Override public void write(String data, int offset, int length) throws IOException {
++                        beforeCommit(); out.write(data, offset, length);
++                    }
++                    @Override public void flush() throws IOException { beforeCommit(); out.flush(); }
++                    @Override public void close() throws IOException { beforeCommit(); out.close(); }
++                });
++            }
++            return writer;
++        }
++
++        @Override public void flushBuffer() throws IOException { beforeCommit(); super.flushBuffer(); }
++        @Override public void sendError(int status) throws IOException { beforeCommit(); super.sendError(status); }
++        @Override public void sendError(int status, String message) throws IOException {
++            beforeCommit(); super.sendError(status, message);
++        }
++        @Override public void sendRedirect(String location) throws IOException { beforeCommit(); super.sendRedirect(location); }
++    }
++}
+diff --git a/src/test/java/com/ebremer/lws/server/EarlyResponseConnectionTest.java b/src/test/java/com/ebremer/lws/server/EarlyResponseConnectionTest.java
+new file mode 100644
+index 0000000..b047bd8
+--- /dev/null
++++ b/src/test/java/com/ebremer/lws/server/EarlyResponseConnectionTest.java
+@@ -0,0 +1,117 @@
++package com.ebremer.lws.server;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import java.io.ByteArrayOutputStream;
++import java.io.InputStream;
++import java.net.ServerSocket;
++import java.net.Socket;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Path;
++import java.util.LinkedHashMap;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Properties;
++import org.eclipse.jetty.server.Server;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++
++/** HTTP/1 framing when an authorization or media-type gate refuses an unread upload. */
++class EarlyResponseConnectionTest {
++    private static final Path tempDir = TestDirs.create();
++    private static Server server;
++    private static LwsComponents components;
++    private static int port;
++
++    @BeforeAll
++    static void start() throws Exception {
++        try (ServerSocket reservation = new ServerSocket(0)) {
++            port = reservation.getLocalPort();
++        }
++        Properties p = new Properties();
++        p.setProperty("lws.base-uri", "http://localhost:" + port);
++        p.setProperty("lws.dev.open", "true");
++        p.setProperty("lws.data-dir", tempDir.toString());
++        LwsConfiguration config = LwsConfiguration.of(p);
++        components = LwsComponents.create(config);
++        server = new Server(port);
++        server.setHandler(JettyLauncher.buildHandler(components, config));
++        server.start();
++    }
++
++    @AfterAll
++    static void stop() throws Exception {
++        if (server != null) server.stop();
++        if (components != null) components.close();
++    }
++
++    @Test
++    void anEarlyRejectionAnnouncesCloseBeforeTheUploadArrives() throws Exception {
++        try (Socket socket = connection()) {
++            // Deliberately withhold the body: the server must reject the type without draining it.
++            send(socket, "POST /.lws/subscriptions HTTP/1.1\r\nHost: localhost:" + port
++                    + "\r\nContent-Type: text/plain\r\nContent-Length: 4096\r\n\r\n");
++            Reply response = read(socket);
++            assertEquals(415, response.status());
++            assertEquals("close", response.headers().get("connection"),
++                    "a completed error must not advertise a reusable socket with an unread upload");
++        }
++    }
++
++    @Test
++    void aFullyConsumedOpaqueJsonUploadKeepsTheConnectionReusable() throws Exception {
++        try (Socket socket = connection()) {
++            String body = "{\"value\":1}";
++            send(socket, "PUT /opaque HTTP/1.1\r\nHost: localhost:" + port
++                    + "\r\nContent-Type: application/json\r\nContent-Length: " + body.length()
++                    + "\r\n\r\n" + body);
++            Reply created = read(socket);
++            assertEquals(201, created.status());
++            assertFalse("close".equals(created.headers().get("connection")));
++            send(socket, "GET /opaque HTTP/1.1\r\nHost: localhost:" + port + "\r\n\r\n");
++            Reply fetched = read(socket);
++            assertEquals(200, fetched.status());
++            assertEquals(body, fetched.body());
++        }
++    }
++
++    private static Socket connection() throws Exception {
++        Socket socket = new Socket("localhost", port);
++        socket.setSoTimeout(3000);
++        return socket;
++    }
++
++    private static void send(Socket socket, String request) throws Exception {
++        socket.getOutputStream().write(request.getBytes(StandardCharsets.UTF_8));
++        socket.getOutputStream().flush();
++    }
++
++    private record Reply(int status, Map<String, String> headers, String body) { }
++
++    private static Reply read(Socket socket) throws Exception {
++        InputStream input = socket.getInputStream();
++        ByteArrayOutputStream header = new ByteArrayOutputStream();
++        int matched = 0;
++        byte[] end = "\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
++        while (matched < end.length) {
++            int value = input.read();
++            assertTrue(value >= 0, "response headers must be complete");
++            header.write(value);
++            matched = value == end[matched] ? matched + 1 : (value == end[0] ? 1 : 0);
++            assertTrue(header.size() < 32768, "bounded response headers");
++        }
++        String[] lines = header.toString(StandardCharsets.US_ASCII).split("\r\n");
++        int status = Integer.parseInt(lines[0].split(" ")[1]);
++        Map<String, String> headers = new LinkedHashMap<>();
++        for (int i = 1; i < lines.length; i++) {
++            int colon = lines[i].indexOf(':');
++            headers.put(lines[i].substring(0, colon).toLowerCase(Locale.ROOT), lines[i].substring(colon + 1).trim());
++        }
++        int length = Integer.parseInt(headers.getOrDefault("content-length", "0"));
++        byte[] body = input.readNBytes(length);
++        assertEquals(length, body.length, "response body must be complete");
++        return new Reply(status, headers, new String(body, StandardCharsets.UTF_8));
++    }
++}
+diff --git a/src/test/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilterTest.java b/src/test/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilterTest.java
+new file mode 100644
+index 0000000..f5ff8e4
+--- /dev/null
++++ b/src/test/java/com/ebremer/lws/server/http/UnreadBodyConnectionFilterTest.java
+@@ -0,0 +1,90 @@
++package com.ebremer.lws.server.http;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++import java.io.IOException;
++import java.io.PrintWriter;
++import java.io.StringWriter;
++import jakarta.servlet.ServletInputStream;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import org.junit.jupiter.api.Test;
++
++class UnreadBodyConnectionFilterTest {
++    private final UnreadBodyConnectionFilter filter = new UnreadBodyConnectionFilter();
++
++    @Test
++    void doesNotSendAnHttp1ConnectionHeaderOnHttp2() throws Exception {
++        HttpServletRequest request = request("HTTP/2.0", 4096);
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        filter.doFilter(request, response, (req, res) -> res.flushBuffer());
++        verify(response, never()).setHeader(eq("Connection"), anyString());
++        verify(request, never()).getInputStream();
++    }
++
++    @Test
++    void aBodylessHttp1ResponseKeepsItsExistingConnectionPolicy() throws Exception {
++        HttpServletRequest request = request("HTTP/1.1", 0);
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        filter.doFilter(request, response, (req, res) -> res.flushBuffer());
++        verify(response, never()).setHeader(eq("Connection"), anyString());
++        verify(request, never()).getInputStream();
++    }
++
++    @Test
++    void anUnreadChunkedBodyIsClosedBeforeWriterOutput() throws Exception {
++        HttpServletRequest request = request("HTTP/1.1", -1);
++        when(request.getHeader("Transfer-Encoding")).thenReturn("chunked");
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        when(response.getWriter()).thenReturn(new PrintWriter(new StringWriter()));
++        filter.doFilter(request, response, (req, res) -> res.getWriter().write("refused"));
++        verify(response, org.mockito.Mockito.atLeastOnce()).setHeader("Connection", "close");
++    }
++
++    @Test
++    void anEmptyEarlyResponseAlsoAnnouncesClose() throws Exception {
++        HttpServletRequest request = request("HTTP/1.0", 4096);
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        filter.doFilter(request, response, (req, res) -> ((HttpServletResponse) res).setStatus(401));
++        verify(response).setHeader("Connection", "close");
++    }
++
++    @Test
++    void anExceptionBeforeOutputStillAnnouncesCloseAndKeepsItsCause() throws Exception {
++        HttpServletRequest request = request("HTTP/1.1", 4096);
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        IOException original = new IOException("handler failed");
++        IOException caught = assertThrows(IOException.class,
++                () -> filter.doFilter(request, response, (req, res) -> { throw original; }));
++        assertSame(original, caught);
++        verify(response).setHeader("Connection", "close");
++    }
++
++    @Test
++    void aGuardFailureDoesNotReplaceTheOriginalHandlerFailure() throws Exception {
++        HttpServletRequest request = request("HTTP/1.1", 4096);
++        IOException guardFailure = new IOException("request stream unavailable");
++        when(request.getInputStream()).thenThrow(guardFailure);
++        IOException original = new IOException("handler failed");
++        IOException caught = assertThrows(IOException.class,
++                () -> filter.doFilter(request, mock(HttpServletResponse.class), (req, res) -> { throw original; }));
++        assertSame(original, caught);
++        assertEquals(1, caught.getSuppressed().length);
++        assertSame(guardFailure, caught.getSuppressed()[0]);
++    }
++
++    private static HttpServletRequest request(String protocol, long length) throws Exception {
++        HttpServletRequest request = mock(HttpServletRequest.class);
++        when(request.getProtocol()).thenReturn(protocol);
++        when(request.getContentLengthLong()).thenReturn(length);
++        when(request.getInputStream()).thenReturn(mock(ServletInputStream.class));
++        return request;
++    }
++}
+-- 
+2.52.0
+

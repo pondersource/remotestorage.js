@@ -20,6 +20,8 @@ interface DriveItem {
  * Public rs.js paths remain private: getItemURL never grants sharing permission.
  */
 class OneDrive extends RemoteBase implements Remote {
+  readonly supportsAtomicCreate = true;
+  getStorageIdentity(): string { return JSON.stringify([this.userAddress || '', this.clientId || '', this.root || '', this.account?.homeAccountId || '']); }
   folderETagsAreRecursive = false;
   clientId: string;
   private redirectUri: string;

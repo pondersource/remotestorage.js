@@ -11,10 +11,12 @@ import Authorize from './authorize';
 import SyncError from './sync-error';
 import UnauthorizedError from './unauthorized-error';
 import { equalContentTypes } from './content-type';
+import { acquireWriteLease, type WriteLease } from './write-lease';
 import {
   applyMixins,
   deepClone,
   equal,
+  globalContext,
   isFolder,
   isDocument,
   pathsFromRoot
@@ -36,6 +38,14 @@ interface SyncTask {
   action: "get" | "put" | "delete";
   path: string;
   promise: Promise<RemoteResponse>;
+  operationId?: string;
+  recovering?: boolean;
+  releaseLease?: () => void;
+}
+
+let operationSequence = 0;
+function nextOperationId(): string {
+  return globalContext.crypto?.randomUUID?.() || Date.now().toString(36) + '-' + (++operationSequence) + '-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
 function taskFor (action: SyncTask["action"], path: SyncTask["path"], promise: SyncTask["promise"]): SyncTask {
@@ -71,7 +81,7 @@ function nodeChanged (node: RSNode, etag: string): boolean {
 
 function isStaleChild (node: RSNode): boolean {
   return !!node.remote && !!node.remote.revision &&
-         !node.remote.itemsMap && !node.remote.body;
+         !node.remote.itemsMap && node.remote.body === undefined;
 }
 
 function hasCommonRevision (node: RSNode): boolean {
@@ -177,6 +187,194 @@ export class Sync {
 
   /** Remote invalidations not yet covered by a request. @internal */
   private remoteChanges = new Set<string>();
+  private writeLeases = new Set<WriteLease>();
+  private reportedWrites = new Set<string>();
+
+  private destination(): string | undefined {
+    const identity = this.rs.remote.getStorageIdentity?.();
+    return identity ? JSON.stringify([this.rs.backend || 'remotestorage', identity]) : undefined;
+  }
+
+  private writeKey(node: RSNode): string {
+    return node.push?.operation?.id || 'legacy:' + node.path + ':' + node.push?.timestamp;
+  }
+
+  private parkedWrite(node: RSNode): boolean {
+    return !!node?.push && this.reportedWrites.has(this.writeKey(node));
+  }
+
+  private reportInterruptedWrite(node: RSNode): Error {
+    const key = this.writeKey(node);
+    const error = Object.assign(new SyncError('A pending local change needs review before syncing can continue.'), {
+      path: node.path, operationId: node.push?.operation?.id, code: 'interrupted-write'
+    });
+    if (!this.reportedWrites.has(key)) {
+      this.reportedWrites.add(key);
+      const operation = node.push?.operation;
+      if (operation?.state === 'conflict' && operation.observed) {
+        const candidate = node.local || node.push;
+        const change = { origin: 'conflict', path: node.path,
+          oldValue: candidate.body, oldContentType: candidate.contentType,
+          newValue: operation.observed.body === false ? undefined : operation.observed.body,
+          newContentType: operation.observed.contentType,
+          lastCommonValue: operation.base.body, lastCommonContentType: operation.base.contentType };
+        setTimeout(() => { if (this.isCurrentSession()) { this._sessionLocal.emitChange(change); } }, 10);
+      }
+      this.rs._emit('error', error);
+    }
+    return error;
+  }
+
+  /** Raw retained candidates for an application recovery/export interface. */
+  async listInterruptedWrites(): Promise<RSNode[]> {
+    const nodes = [];
+    await this._sessionLocal.forAllNodes((node: RSNode) => {
+      if (node.push && this.rs.access.checkPathPermission(node.path, 'r')) { nodes.push(deepClone(node)); }
+    });
+    return nodes;
+  }
+
+  private sameRepresentation(left: RSItem, right: RSItem): boolean {
+    if (left.body === false || right.body === false) { return left.body === false && right.body === false; }
+    return left.body !== undefined && right.body !== undefined && equal(left.body, right.body) &&
+      equalContentTypes(left.contentType, right.contentType);
+  }
+
+  /** Recheck an interrupted operation without blindly replaying its mutation.
+   * Exact candidate readback confirms it; an unchanged base permits only a
+   * conditional retry. Other versions remain retained for explicit resolution.
+   */
+  async retryInterruptedWrite(path: string, operationId: string): Promise<void> {
+    if (!this.rs.access.checkPathPermission(path, 'rw')) { throw new Error('Write recovery is not permitted for this scope.'); }
+    const lease = await acquireWriteLease(this._sessionLocal.sharedCacheId, this.destination(), path);
+    if (lease) { this.writeLeases.add(lease); }
+    try {
+      if (!lease) { throw new Error('Write ownership cannot be established. Export the retained local changes.'); }
+      await withCacheTransaction(this._sessionLocal, async () => {
+        const nodes = await this._sessionLocal.getNodes([path]), node = nodes[path], operation = node?.push?.operation;
+        this.assertCurrentSession();
+        if (!operation || operation.id !== operationId || operation.version !== 1 || !operation.owned || operation.destination !== this.destination()) {
+          throw new Error('This recovery selection is no longer current.');
+        }
+        operation.state = 'interrupted';
+        await this._sessionLocal.setNodes(nodes);
+        this.reportedWrites.delete(operationId);
+      });
+      const response = await this.rs.remote.get(path);
+      if (![200, 404].includes(response.statusCode)) { throw new SyncError('The remote version could not be refreshed for recovery.'); }
+      await withCacheTransaction(this._sessionLocal, async () => {
+        const node = (await this._sessionLocal.getNodes([path]))[path];
+        this.assertCurrentSession();
+        if (node?.push?.operation?.id !== operationId || node.push.operation.destination !== this.destination()) {
+          throw new Error('This recovery selection is no longer current.');
+        }
+        await this.recoverPush(path, operationId, response);
+      });
+    } finally { if (lease) { lease.release(); this.writeLeases.delete(lease); } }
+    this.addTask(path);
+    if (!this.stopped) { this.doTasks(); }
+  }
+
+  /** Explicit application decision after inspecting retained conflict versions.
+   * Refreshes the reviewed remote version before dropping or replacing either
+   * candidate. A further change requires another review instead of overwriting.
+   */
+  async resolveInterruptedWrite(path: string, operationId: string, choice: 'local' | 'remote'): Promise<void> {
+    if (!['local', 'remote'].includes(choice) || !this.rs.access.checkPathPermission(path, 'rw')) {
+      throw new Error('This write recovery decision is not permitted.');
+    }
+    const snapshot = await withCacheTransaction(this._sessionLocal, async () => {
+      const node = (await this._sessionLocal.getNodes([path]))[path];
+      this.assertCurrentSession();
+      if (node?.push?.operation?.id !== operationId || node.push.operation.version !== 1 || node.push.operation.state !== 'conflict' || !node.push.operation.observed ||
+            node.push.operation.destination !== this.destination() || !node.push.operation.owned) {
+        throw new Error('This recovery selection is no longer current.');
+      }
+      return deepClone(node);
+    });
+    const lease = await acquireWriteLease(this._sessionLocal.sharedCacheId, this.destination(), path);
+    if (lease) { this.writeLeases.add(lease); }
+    try {
+      if (!lease) { throw new Error('Write ownership cannot be established. Export the retained local changes.'); }
+      await withCacheTransaction(this._sessionLocal, async () => {
+        const node = (await this._sessionLocal.getNodes([path]))[path];
+        this.assertCurrentSession();
+        if (node?.push?.operation?.id !== operationId || node.push.operation.destination !== this.destination()) {
+          throw new Error('This recovery selection is no longer current.');
+        }
+        if (!equal(node.local, snapshot.local) || !equal(node.push, snapshot.push)) {
+          this.reportedWrites.delete(operationId);
+          throw this.reportInterruptedWrite(node);
+        }
+      });
+      const response = await this.rs.remote.get(path);
+      if (![200, 404].includes(response.statusCode)) { throw new SyncError('The remote version could not be refreshed for review.'); }
+      const observed: RSItem = { body: response.statusCode === 404 ? false : response.body,
+        contentType: response.contentType, revision: response.revision, timestamp: this.now() };
+      await withCacheTransaction(this._sessionLocal, async () => {
+        const nodes = await this._sessionLocal.getNodes([path]), node = nodes[path];
+        this.assertCurrentSession();
+        if (node?.push?.operation?.id !== operationId || node.push.operation.destination !== this.destination()) { throw new Error('This recovery selection is no longer current.'); }
+        const reviewed = snapshot.push.operation.observed;
+        if (!equal(node.local, snapshot.local) || observed.revision !== reviewed.revision ||
+            !this.sameRepresentation(observed, reviewed) || (choice === 'local' &&
+              ((observed.body !== false && !observed.revision) || (observed.body === false && this.rs.remote.supportsAtomicCreate !== true)))) {
+          node.push.operation.observed = observed;
+          await this._sessionLocal.setNodes(nodes);
+          this.reportedWrites.delete(operationId);
+          throw this.reportInterruptedWrite(node);
+        }
+        if (choice === 'remote') { delete node.local; }
+        else if (!node.local) { node.local = deepClone(node.push); delete (node.local as RSNode['push']).operation; }
+        node.common = observed.body === false ? {} : observed;
+        delete node.push; delete node.remote;
+        if (choice === 'remote' && observed.body === false) { nodes[path] = undefined; }
+        await this._sessionLocal.setNodes(nodes);
+        this.reportedWrites.delete(operationId);
+      });
+    } finally { if (lease) { lease.release(); this.writeLeases.delete(lease); } }
+    this.addTask(path);
+    if (!this.stopped) { this.doTasks(); }
+  }
+
+  /** Reconcile an uncertain outcome only after fresh, unconditional readback. */
+  private async recoverPush(path: string, operationId: string, response: RemoteResponse): Promise<void> {
+    const nodes = await this._sessionLocal.getNodes([path]);
+    this.assertCurrentSession();
+    const node = nodes[path], push = node?.push, operation = push?.operation;
+    if (!operation || operation.id !== operationId || operation.destination !== this.destination()) { return; }
+    const observed: RSItem = { body: response.statusCode === 404 ? false : response.body,
+      contentType: response.contentType, revision: response.revision, timestamp: this.now() };
+    if (this.sameRepresentation(push, observed)) {
+      node.common = observed.body === false ? {} : observed;
+      if (node.local && this.sameRepresentation(node.local, push)) { delete node.local; }
+      delete node.push; delete node.remote;
+      if (observed.body === false && !node.local) { nodes[path] = undefined; }
+      this.reportedWrites.delete(operationId);
+    } else {
+      const base = operation.base;
+      const sameKnownRevision = !!base.revision && base.revision === observed.revision &&
+        (base.body === undefined || this.sameRepresentation(base, observed));
+      const sameUnversionedBase = !base.revision && this.sameRepresentation(base, observed);
+      const stillAbsent = !base.revision && (base.body === undefined || base.body === false) && observed.body === false;
+      if ((sameKnownRevision || sameUnversionedBase || stillAbsent) &&
+          (observed.body !== false || this.rs.remote.supportsAtomicCreate === true) &&
+          (observed.body === false || !!observed.revision) &&
+          (this.rs.remote as typeof this.rs.remote & { supportsRevs?: boolean }).supportsRevs !== false && this.rs.access.checkPathPermission(path, 'rw')) {
+        // The operation's captured base is still current. A subsequent task
+        // creates a fresh operation guarded by this reviewed validator (or *).
+        node.common = observed.body === false ? {} : observed;
+        if (!node.local) { node.local = deepClone(push); delete (node.local as RSNode['push']).operation; }
+        delete node.push; delete node.remote;
+        this.reportedWrites.delete(operationId);
+      } else {
+        operation.state = 'conflict'; operation.observed = observed;
+        await this._sessionLocal.setNodes(nodes);
+        throw this.reportInterruptedWrite(node);
+      }
+    }
+    await this._sessionLocal.setNodes(this.flush(nodes));
+  }
 
   /** Queue a targeted revalidation, including when a request is in flight. @internal */
   refreshRemote (path: string): void {
@@ -331,6 +529,11 @@ export class Sync {
     return this._sessionLocal.forAllNodes((node: RSNode) => {
       if (num > 100) { return; }
 
+      if (this.parkedWrite(node)) { return; }
+      if (typeof node?.path === 'string' && node.push && isDocument(node.path) && this.rs.access.checkPathPermission(node.path, 'rw')) {
+        this.addTask(node.path); num++; return;
+      }
+
       if (this.isCorrupt(node)) {
         log('[Sync] WARNING: corrupt node in local cache', node);
         if (typeof(node) === 'object' && node.path) {
@@ -476,7 +679,7 @@ export class Sync {
     for (const path in nodes) {
       // Strategy is 'FLUSH' and no local changes exist
       if (this.rs.caching.checkPath(path) === 'FLUSH' &&
-          nodes[path] && !nodes[path].local) {
+          nodes[path] && !nodes[path].local && !nodes[path].push) {
         log('[Sync] Flushing', path);
         nodes[path] = undefined; // Cause node to be flushed from cache
       }
@@ -488,13 +691,43 @@ export class Sync {
    * Sync one path
    */
   async doTask (path: string): Promise<SyncTask> {
+    const lease = await acquireWriteLease(this._sessionLocal.sharedCacheId, this.destination(), path);
+    if (lease) { this.writeLeases.add(lease); }
+    const releaseLease = () => { if (lease) { lease.release(); this.writeLeases.delete(lease); } };
+    try {
+      this.assertCurrentSession();
+      const task = await this.taskUnderLease(path, !!lease);
+      task.releaseLease = releaseLease;
+      return task;
+    } catch (error) {
+      releaseLease();
+      throw error;
+    }
+  }
+
+  private async taskUnderLease(path: string, owned: boolean): Promise<SyncTask> {
     const revalidate = this.remoteChanges.delete(path);
-    return withCacheTransaction(this._sessionLocal, () => this._sessionLocal.getNodes([path]).then((nodes: RSNodes) => {
+    return withCacheTransaction(this._sessionLocal, () => this._sessionLocal.getNodes([path]).then(async (nodes: RSNodes) => {
       // The session may have been replaced while the cache lookup was in
       // flight; do not act on it against the replacement session.
       this.assertCurrentSession();
 
       const node = nodes[path];
+      if (node?.push) {
+        const operation = node.push.operation;
+        if (!owned || !operation?.owned || operation.version !== 1 || !operation.base || operation.destination !== this.destination() || operation.state === 'conflict') {
+          throw this.reportInterruptedWrite(node);
+        }
+        if (!node.local) {
+          node.local = deepClone(node.push);
+          delete (node.local as RSNode['push']).operation;
+        }
+        operation.state = 'interrupted';
+        await this._sessionLocal.setNodes(nodes);
+        const task = taskFor('get', path, this.rs.remote.get(path));
+        task.operationId = operation.id; task.recovering = true;
+        return task;
+      }
       if (revalidate) {
         return taskFor('get', path, this.rs.remote.get(path,
           node?.common?.revision ? { ifNoneMatch: node.common.revision } : {}));
@@ -519,6 +752,7 @@ export class Sync {
       else if (this.needsRemotePut(node)) {
         node.push = deepClone(node.local);
         node.push.timestamp = this.now();
+        node.push.operation = { version: 1, id: nextOperationId(), destination: this.destination(), base: deepClone(node.common || {}), owned, state: 'pending' };
 
         return this._sessionLocal.setNodes(this.flush(nodes)).then(() => {
           this.assertCurrentSession();
@@ -531,7 +765,7 @@ export class Sync {
             options = { ifNoneMatch: '*' };
           }
 
-          return taskFor('put', path,
+          const task = taskFor('put', path,
             this.rs.remote.put(
               path,
               node.push.body as XMLHttpRequestBodyInit,
@@ -539,19 +773,25 @@ export class Sync {
               options
             )
           );
+          task.operationId = node.push.operation.id;
+          return task;
         });
       }
       // Push DELETE:
       else if (this.needsRemoteDelete(node)) {
+        if (!hasCommonRevision(node)) { return taskFor('get', path, this.rs.remote.get(path)); }
         node.push = { body: false, timestamp: this.now() };
+        node.push.operation = { version: 1, id: nextOperationId(), destination: this.destination(), base: deepClone(node.common || {}), owned, state: 'pending' };
 
         return this._sessionLocal.setNodes(this.flush(nodes)).then(() => {
           this.assertCurrentSession();
 
           if (hasCommonRevision(node)) {
-            return taskFor('delete', path,
+            const task = taskFor('delete', path,
               this.rs.remote.delete(path, { ifMatch: node.common.revision })
             );
+            task.operationId = node.push.operation.id;
+            return task;
           } else { // Ascertain current common or remote revision first
             return taskFor('get', path, this.rs.remote.get(path));
           }
@@ -671,8 +911,13 @@ export class Sync {
     // the merge result belongs to the old session and must be dropped.
     this.assertCurrentSession();
 
+    // Neither a live write nor an uncertain persisted write may lose its local
+    // candidate to a racing refresh. Matching acknowledgement/readback owns
+    // reconciliation; parent listings retain only an invalidation meanwhile.
+    if (isDocument(node.path) && node.push) { return node; }
+
     if (!node.remote) {
-      if (node.common.body) {
+      if (node.common.body !== undefined && node.common.body !== false) {
         this._sessionLocal.emitChange({
           origin:   'remote',
           path:     node.path,
@@ -970,11 +1215,14 @@ export class Sync {
   /**
    * Handle successful PUT or DELETE request
    */
-  async completePush (path: string, action: "put" | "delete", conflict: boolean, revision: string): Promise<void> {
+  async completePush (path: string, action: "put" | "delete", conflict: boolean, revision: string, operationId?: string): Promise<void> {
     const nodes = await this._sessionLocal.getNodes([path]);
     this.assertCurrentSession();
 
     const node = nodes[path];
+
+    if (operationId && node?.push?.operation?.id !== operationId) { return; }
+    if (node?.push?.operation && node.push.operation.id !== operationId) { return; }
 
     if (!node.push) {
       this.stopped = true;
@@ -982,6 +1230,11 @@ export class Sync {
     }
 
     if (conflict) {
+      if (node.push.operation) {
+        node.push.operation.state = 'interrupted';
+        await this._sessionLocal.setNodes(nodes);
+        return;
+      }
       log('[Sync] We have a conflict');
 
       if (!node.remote || node.remote.revision !== revision) {
@@ -1003,19 +1256,24 @@ export class Sync {
         node.common.body = node.push.body;
         node.common.contentType = node.push.contentType;
 
-        if (equal(node.local.body, node.push.body) &&
-            node.local.contentType === node.push.contentType) {
+        if (node.local && equal(node.local.body, node.push.body) &&
+            equalContentTypes(node.local.contentType, node.push.contentType)) {
           delete node.local;
         }
 
         delete node.push;
       } else if (action === 'delete') {
-        if (node.local.body === false) { // No new local changes since push; flush it.
+        if (!node.local || node.local.body === false) { // No new local changes since push; flush it.
           nodes[path] = undefined;
         } else {
           delete node.push;
         }
       }
+    }
+
+    if (!conflict && nodes[path]?.remote) {
+      delete nodes[path].remote;
+      this.remoteChanges.add(path);
     }
 
     this.assertCurrentSession();
@@ -1025,12 +1283,12 @@ export class Sync {
   /**
    * Remove push item from cached nodes that failed to sync
    */
-  async dealWithFailure (path: string): Promise<void> {
+  async dealWithFailure (path: string, operationId?: string): Promise<void> {
     const nodes = await this._sessionLocal.getNodes([path]);
     this.assertCurrentSession();
 
-    if (nodes[path]) {
-      delete nodes[path].push;
+    if (operationId && nodes[path]?.push?.operation?.id === operationId) {
+      nodes[path].push.operation.state = 'interrupted';
       return this._sessionLocal.setNodes(this.flush(nodes));
     }
   }
@@ -1099,16 +1357,27 @@ export class Sync {
   /**
    * Handle response of executed request
    */
-  async handleResponse (path: string, action: SyncTask["action"], r: RemoteResponse): Promise<boolean> {
+  async handleResponse (path: string, action: SyncTask["action"], r: RemoteResponse, operationId?: string, recovering: boolean = false): Promise<boolean> {
     this.assertCurrentSession();
 
+    if (operationId) {
+      const node = (await this._sessionLocal.getNodes([path]))[path];
+      this.assertCurrentSession();
+      if (node?.push?.operation?.id !== operationId || node.push.operation.destination !== this.destination()) { return true; }
+    }
+
     const status = this.interpretStatus(r.statusCode);
+
+    if (recovering && operationId && (r.statusCode === 200 || r.statusCode === 404)) {
+      await this.recoverPush(path, operationId, r);
+      return true;
+    }
 
     if (status.successful) {
       if (action === 'get') {
         return this.handleGetResponse(path, status, r.body, r.contentType, r.revision);
       } else if (action === 'put' || action === 'delete') {
-        return this.completePush(path, action, status.conflict, r.revision).then(function () {
+        return this.completePush(path, action, status.conflict, r.revision, operationId).then(function () {
           return true;
         });
       } else {
@@ -1125,7 +1394,7 @@ export class Sync {
         error = new Error('HTTP response code ' + status.statusCode + ' received.');
       }
 
-      return this.dealWithFailure(path).then(() => {
+      return this.dealWithFailure(path, operationId).then(() => {
         this.rs._emit('error', error);
         throw error;
       });
@@ -1168,6 +1437,8 @@ export class Sync {
     this._running = {};
     this._timeStarted = {};
     this._finishedTasks = [];
+    for (const lease of this.writeLeases) { lease.release(); }
+    this.writeLeases.clear();
   }
 
   /**
@@ -1187,6 +1458,7 @@ export class Sync {
     }
 
     if (task.action === undefined) {
+      task.releaseLease?.();
       delete this._running[task.path];
       return;
     }
@@ -1219,7 +1491,7 @@ export class Sync {
 
     try {
       const completed = await withCacheTransaction(this._sessionLocal, () =>
-        this.handleResponse(task.path, task.action, res));
+        this.handleResponse(task.path, task.action, res, task.operationId, task.recovering));
       this.finishSuccessfulTask(task, completed);
     } catch (err) {
       // A `SessionEndedError` means the session changed after the check above
@@ -1234,6 +1506,7 @@ export class Sync {
   }
 
   async finishSuccessfulTask (task: SyncTask, completed: boolean): Promise<void> {
+    task.releaseLease?.();
     this._finishedTasks.shift();
     delete this._timeStarted[task.path];
     delete this._running[task.path];
@@ -1272,6 +1545,8 @@ export class Sync {
   }
 
   async finishUnsuccessfulTask (task: SyncTask, err: Error): Promise<void> {
+    task.releaseLease?.();
+    if ((err as Error & { code?: string }).code === 'interrupted-write') { this.failQueuedTasks(task.path, err); }
     log('[Sync]', err.message);
 
     this._finishedTasks.shift();
@@ -1379,7 +1654,7 @@ export class Sync {
   /**
    * Add a sync task for the given path
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   addTask (path: string, cb?: (err?: Error) => void): void {
     if (!this._tasks[path]) {
       this._tasks[path] = [];
@@ -1491,6 +1766,8 @@ export class Sync {
       // Settle pending requests now, rather than waiting for a response that
       // may never arrive after the session has been torn down.
       remoteStorage.sync.failAllQueuedTasks(new Error(SESSION_ENDED_MESSAGE));
+      for (const lease of remoteStorage.sync.writeLeases) { lease.release(); }
+      remoteStorage.sync.writeLeases.clear();
     }
 
     remoteStorage.removeEventListener('ready', setupSync);

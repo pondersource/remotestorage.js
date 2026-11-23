@@ -75,3 +75,5 @@ jobs:
       - run: npx playwright install --with-deps chromium
       # Real web/ORM packages; simulated wallet channel, no broker claim.
       - run: node --test test/nextgraph-build.test.cjs test/nextgraph-browser.test.cjs test/onedrive-startup.test.cjs
+      - name: Persistent cache durability and cross-tab transactions
+        run: node --test test/cache-durability-browser.test.cjs

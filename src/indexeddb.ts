@@ -51,18 +51,22 @@ const DEFAULT_DB_NAME = 'remotestorage';
 let DEFAULT_DB;
 
 class IndexedDB extends CachingLayer {
+  /** Same-origin identity shared by adapters for this database's node store. */
+  readonly sharedCacheId?: string;
   db: any;
   getsRunning: number;
   putsRunning: number;
   changesQueued: { [key: string]: unknown };
   changesRunning: { [key: string]: unknown };
   commitSlownessWarning: any; // TODO null | number (but node's setInterval returns an unknown type)
+  private queuedWaiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
 
   constructor(database) {
     super();
     this.addEvents(['change', 'local-events-done']);
 
     this.db = database || DEFAULT_DB;
+    if (typeof this.db?.name === 'string') { this.sharedCacheId = 'indexeddb:' + this.db.name + ':nodes'; }
 
     if (!this.db) {
       // TODO shouldn't this throw an error?
@@ -89,9 +93,9 @@ class IndexedDB extends CachingLayer {
      * The node's path is used as the key.
      *
      * At any time there is at most one IndexedDB transaction running.
-     * changesRunning stores the changes that are included in that currently
-     * running IndexedDB transaction, or if none is running, of the last one
-     * that ran.
+     * changesRunning stores only the currently running transaction. Once that
+     * transaction settles, reads must see the database again so another tab's
+     * committed changes cannot be hidden by an old local overlay.
      */
     this.changesRunning = {};
 
@@ -129,10 +133,14 @@ class IndexedDB extends CachingLayer {
    * TODO: Document
    */
   async setNodes (nodes: RSNodes): Promise<void> {
-    for (const i in nodes) {
-      this.changesQueued[i] = nodes[i] || false;
-    }
-    this.maybeFlush();
+    if (Object.keys(nodes).length === 0) { return; }
+    return new Promise<void>((resolve, reject) => {
+      for (const i in nodes) {
+        this.changesQueued[i] = nodes[i] || false;
+      }
+      this.queuedWaiters.push({ resolve, reject });
+      this.maybeFlush();
+    });
   }
 
   /**
@@ -158,10 +166,21 @@ class IndexedDB extends CachingLayer {
       clearInterval(this.commitSlownessWarning);
       this.commitSlownessWarning = null;
     }
-    if (Object.keys(this.changesQueued).length > 0) {
-      this.changesRunning = this.changesQueued;
+    if (this.putsRunning === 0 && Object.keys(this.changesQueued).length > 0) {
+      const batch = this.changesQueued;
+      const waiters = this.queuedWaiters;
+      this.changesRunning = batch;
       this.changesQueued = {};
-      this.setNodesInDb(this.changesRunning).then(this.flushChangesQueued.bind(this));
+      this.queuedWaiters = [];
+      const finish = (succeeded: boolean, error?: unknown): void => {
+        if (this.changesRunning === batch) { this.changesRunning = {}; }
+        const failure = error ?? new Error('IndexedDB write failed');
+        for (const waiter of waiters) {
+          if (succeeded) { waiter.resolve(); } else { waiter.reject(failure); }
+        }
+        this.flushChangesQueued();
+      };
+      this.setNodesInDb(batch).then(() => finish(true), error => finish(false, error));
     }
   }
 
@@ -206,48 +225,54 @@ class IndexedDB extends CachingLayer {
     return new Promise((resolve, reject) => {
 
       const transaction = this.db.transaction(['nodes'], 'readwrite');
-      const nodesStore = transaction.objectStore('nodes');
       const startTime = new Date().getTime();
 
       this.putsRunning++;
+      let settled = false;
+      let failed = false;
+      let failure: unknown;
+      const finish = (succeeded: boolean, error?: unknown): void => {
+        if (settled) { return; }
+        settled = true;
+        this.putsRunning--;
+        if (succeeded) { resolve(); } else { reject(error); }
+      };
+      const abort = (error: unknown): void => {
+        if (settled) { return; }
+        if (!failed) { failed = true; failure = error; }
+        // Request errors may have had preventDefault() called by a listener.
+        // Abort explicitly, then retain the lock/overlay until the terminal event.
+        try { transaction.abort(); } catch { /* abort or completion already queued */ }
+      };
+
+      transaction.oncomplete = () => {
+        log('[IndexedDB] Finished puts', nodes, this.putsRunning, (new Date().getTime() - startTime) + 'ms');
+        finish(!failed, failure);
+      };
+      transaction.onerror = (event?: Event) => {
+        const request = event?.target as IDBRequest | undefined;
+        const error = transaction.error || request?.error || new Error('IndexedDB write transaction error');
+        event?.preventDefault();
+        abort(error);
+      };
+      transaction.onabort = () => finish(false, failed ? failure :
+        transaction.error || new Error('IndexedDB write transaction aborted'));
 
       log('[IndexedDB] Starting puts', nodes, this.putsRunning);
 
-      for (const path in nodes) {
-        const node = nodes[path];
-        if (typeof (node) === 'object') {
-          try {
+      try {
+        const nodesStore = transaction.objectStore('nodes');
+        for (const path in nodes) {
+          const node = nodes[path];
+          if (typeof (node) === 'object') {
             nodesStore.put(node);
-          } catch (e) {
-            log('[IndexedDB] Error while putting', node, e);
-            throw e;
-          }
-        } else {
-          try {
+          } else {
             nodesStore.delete(path);
-          } catch (e) {
-            log('[IndexedDB] Error while removing', nodesStore, node, e);
-            throw e;
           }
         }
+      } catch (error) {
+        abort(error);
       }
-
-      transaction.oncomplete = () => {
-        this.putsRunning--;
-        log('[IndexedDB] Finished puts', nodes, this.putsRunning, (new Date().getTime() - startTime) + 'ms');
-        resolve();
-      };
-
-      transaction.onerror = () => {
-        this.putsRunning--;
-        reject('transaction error');
-      };
-
-      transaction.onabort = () => {
-        reject('transaction abort');
-        this.putsRunning--;
-      };
-
     });
   }
 

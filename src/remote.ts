@@ -86,6 +86,10 @@ export interface RemoteResponse {
  * The public interface for WireClient, GoogleDrive & Dropbox
  */
 export interface Remote {
+  /** Stable account and actual storage namespace, without credentials. @internal */
+  getStorageIdentity?: () => string;
+  /** Whether create-if-absent guarantees one logical path winner. @internal */
+  supportsAtomicCreate?: boolean;
   /** Whether a folder validator covers every descendant. Defaults to true. @internal */
   folderETagsAreRecursive?: boolean;
 

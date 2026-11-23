@@ -133,6 +133,8 @@ class WireClient extends RemoteBase implements Remote {
   href: string;
 
   supportsRevs: boolean;
+  get supportsAtomicCreate(): boolean { return this.supportsRevs === true; }
+  getStorageIdentity(): string { return JSON.stringify([this.userAddress || '', this.href || '', this.storageApi || '']); }
 
   _revisionCache: { [key: string]: any } = {};
 

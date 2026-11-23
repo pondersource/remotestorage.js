@@ -3,6 +3,7 @@ import CachingLayer from './cachinglayer';
 import EventHandling from './eventhandling';
 import log from './log';
 import { applyMixins, localStorageAvailable } from './util';
+import { BinaryCacheError, deserializeCacheNode, serializeCacheNode } from './cache-serialization';
 
 /**
  * localStorage caching adapter. Used when no IndexedDB available.
@@ -21,6 +22,8 @@ function isNodeKey(key: string): boolean {
 }
 
 class LocalStorage extends CachingLayer {
+  readonly sharedCacheId = 'localstorage:' + NODES_PREFIX;
+
   constructor() {
     super();
     this.addEvents(['change', 'local-events-done']);
@@ -36,9 +39,10 @@ class LocalStorage extends CachingLayer {
 
     for (let i = 0, len = paths.length; i < len; i++) {
       try {
-        const node = JSON.parse(localStorage.getItem(NODES_PREFIX + paths[i]));
+        const node = deserializeCacheNode(localStorage.getItem(NODES_PREFIX + paths[i]));
         nodes[paths[i]] = node || undefined;
       } catch (e) {
+        if (e instanceof BinaryCacheError) { throw e; }
         log(`[LocalStorage] Failed to get node: ${e.message}`);
         nodes[paths[i]] = undefined;
       }
@@ -49,7 +53,7 @@ class LocalStorage extends CachingLayer {
 
   setNodes(nodes: RSNodes): Promise<void> {
     for (const path in nodes) {
-      localStorage.setItem(NODES_PREFIX + path, JSON.stringify(nodes[path]));
+      localStorage.setItem(NODES_PREFIX + path, serializeCacheNode(nodes[path]));
     }
 
     return Promise.resolve();
@@ -61,8 +65,9 @@ class LocalStorage extends CachingLayer {
     for (let i = 0, len = localStorage.length; i < len; i++) {
       if (isNodeKey(localStorage.key(i))) {
         try {
-          node = JSON.parse(localStorage.getItem(localStorage.key(i)));
+          node = deserializeCacheNode(localStorage.getItem(localStorage.key(i)));
         } catch (e) {
+          if (e instanceof BinaryCacheError) { throw e; }
           node = undefined;
         }
         if (node) {

@@ -142,6 +142,8 @@ function isBinaryData (data): boolean {
  * @class
  */
 class Dropbox extends RemoteBase implements Remote {
+  readonly supportsAtomicCreate = true;
+  getStorageIdentity(): string { return JSON.stringify([this.userAddress || '', this.clientId || '', PATH_PREFIX]); }
   clientId: string;
   TOKEN_URL: string;   // OAuth2 PKCE
   token: string;

@@ -1,2 +1,3 @@
 # Preserve the reviewed format-patch bytes, including blank context lines.
 read-lifetimes.patch -whitespace
+early-response.patch -whitespace

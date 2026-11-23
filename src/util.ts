@@ -87,11 +87,11 @@ export const equal = (a: any, b: any, seen = []): boolean => {
     return a.toString() === b.toString();
   }
 
-  if (a instanceof ArrayBuffer && b instanceof ArrayBuffer) {
-    // Without the following conversion the browsers wouldn't be able to
-    // tell the ArrayBuffer instances apart.
-    a = new Uint8Array(a);
-    b = new Uint8Array(b);
+  if (a instanceof ArrayBuffer || ArrayBuffer.isView(a) || b instanceof ArrayBuffer || ArrayBuffer.isView(b)) {
+    if (!(a instanceof ArrayBuffer || ArrayBuffer.isView(a)) || !(b instanceof ArrayBuffer || ArrayBuffer.isView(b))) { return false; }
+    const left = a instanceof ArrayBuffer ? new Uint8Array(a) : new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const right = b instanceof ArrayBuffer ? new Uint8Array(b) : new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    return left.length === right.length && left.every((byte, index) => byte === right[index]);
   }
 
   // typeof null is 'object'. If either is null, check if they are equal.
@@ -156,6 +156,20 @@ export const deepClone = (obj: any): any => {
     return undefined;
   } else if (typeof structuredClone === 'function') {
     return structuredClone(obj);
+  } else if (obj instanceof ArrayBuffer) {
+    return obj.slice(0);
+  } else if (ArrayBuffer.isView(obj)) {
+    const buffer = new Uint8Array(obj.buffer, obj.byteOffset, obj.byteLength).slice().buffer;
+    const constructor = obj.constructor as { new(buffer: ArrayBuffer): ArrayBufferView };
+    return obj instanceof DataView ? new DataView(buffer) : new constructor(buffer);
+  } else if (Array.isArray(obj)) {
+    return obj.map(item => deepClone(item));
+  } else if (obj && Object.prototype.toString.call(obj) === '[object Object]') {
+    const copy = {};
+    for (const key of Object.keys(obj)) {
+      Object.defineProperty(copy, key, { value: deepClone(obj[key]), enumerable: true, writable: true, configurable: true });
+    }
+    return copy;
   } else {
     return JSON.parse(JSON.stringify(obj));
   }
