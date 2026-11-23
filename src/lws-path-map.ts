@@ -60,6 +60,9 @@ class LWSPathMap {
   private async read(url: string): Promise<Index> {
     const response = await this.send(url, { headers: { Accept: INDEX_MEDIA_TYPE } });
     if (!response.ok) { throw new Error('Cannot read the rs.js LWS index (HTTP ' + response.status + ').'); }
+    if (response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== INDEX_MEDIA_TYPE) {
+      throw new Error('The LWS index returned an unexpected media type.');
+    }
     const revision = response.headers.get('etag');
     if (!revision || revision.startsWith('W/')) { throw new Error('The LWS index needs an exposed strong ETag for safe sync.'); }
     const text = await response.text();
@@ -83,8 +86,36 @@ class LWSPathMap {
     return { url, revision, entries };
   }
 
+  private async indexCandidates(items): Promise<string[]> {
+    const candidates = new Set<string>();
+    const unknown = [];
+    for (const item of items) {
+      const types = Array.isArray(item.type) ? item.type : [item.type];
+      if (types.includes('Container') || types.includes('https://www.w3.org/ns/lws#Container')) { continue; }
+      const type = item.format?.split(';')[0].trim().toLowerCase();
+      if (type === INDEX_MEDIA_TYPE) { candidates.add(item.id); }
+      else if (!type || type === 'application/octet-stream') { unknown.push(item.id); }
+    }
+    // Some container projections lose a member's stored media type. HEAD is
+    // authoritative and avoids downloading arbitrary native/binary resources.
+    let next = 0;
+    const worker = async () => {
+      while (next < unknown.length) {
+        const url = unknown[next++];
+        const response = await this.send(url, { method: 'HEAD' });
+        if (response.status === 404) { continue; }
+        if (!response.ok) { throw new Error('Cannot discover an LWS member media type (HTTP ' + response.status + ').'); }
+        const type = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+        if (!type) { throw new Error('The LWS member did not expose its media type.'); }
+        if (type === INDEX_MEDIA_TYPE) { candidates.add(url); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, unknown.length) }, worker));
+    return [...candidates];
+  }
+
   async load(): Promise<Index> {
-    const candidates = [...new Set((await this.rootItems()).filter(item => item.format?.split(';')[0].trim() === INDEX_MEDIA_TYPE).map(item => item.id))];
+    const candidates = await this.indexCandidates(await this.rootItems());
     if (candidates.length > 1) { throw new Error('Multiple rs.js LWS indexes were found. Resolve this setup conflict before syncing.'); }
     this.cache = candidates.length ? await this.read(candidates[0]) : undefined;
     return this.cache;

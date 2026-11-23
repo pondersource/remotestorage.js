@@ -600,13 +600,10 @@ class GoogleDrive extends RemoteBase implements Remote {
           return getTextFromArrayBuffer(response.response, 'UTF-8').then((responseText) => {
             this.assertSession(sessionVersion);
             let body = responseText;
-            if (meta.mimeType.match(/^application\/json/)) {
-              try {
-                body = JSON.parse(body as string);
-              } catch(e) {
-                // body couldn't be parsed as JSON, so we'll just return it as is
-              }
-            } else if (shouldBeTreatedAsBinary(responseText, meta.mimeType)) {
+            // JSON remains text, matching BaseClient.storeObject and the
+            // acknowledged Sync representation. Object parsing belongs to
+            // BaseClient.getObject; preserve the existing JSON/text distinction.
+            if (!meta.mimeType.match(/^application\/json/) && shouldBeTreatedAsBinary(responseText, meta.mimeType)) {
               //return unprocessed response
               body = response.response;
             }

@@ -1,0 +1,541 @@
+From 524a931743f677af7436522df4c401ce1dbc8e62 Mon Sep 17 00:00:00 2001
+From: Michiel de Jong <michielbdejong@ontola.io>
+Date: Mon, 23 Nov 2026 15:56:57 +0100
+Subject: [PATCH] Retain binary response snapshots across concurrent writes
+
+Pin the immutable blob key while taking a fresh HTTP metadata snapshot, and reclaim retired versions only after their last response closes. Keep lazy blob I/O outside the metadata transaction and retirement guard, and leave write preconditions unchanged. Preserve stored non-RDF media parameters instead of dropping them.
+---
+ .../lws/server/core/ResourceService.java      | 114 +++++++-
+ .../lws/server/http/LwsResourceServlet.java   |  29 +-
+ .../server/http/BinaryReadLifetimeTest.java   | 274 ++++++++++++++++++
+ 3 files changed, 402 insertions(+), 15 deletions(-)
+ create mode 100644 src/test/java/com/ebremer/lws/server/http/BinaryReadLifetimeTest.java
+
+diff --git a/src/main/java/com/ebremer/lws/server/core/ResourceService.java b/src/main/java/com/ebremer/lws/server/core/ResourceService.java
+index 4f67239..2a154ea 100644
+--- a/src/main/java/com/ebremer/lws/server/core/ResourceService.java
++++ b/src/main/java/com/ebremer/lws/server/core/ResourceService.java
+@@ -87,6 +87,11 @@ public final class ResourceService {
+     private final Authorizer authorizer;
+     private final LwsConfiguration config;
+     private final Clock clock;
++    // Snapshot creation and pinning share this guard with post-commit retirement.
++    // Never acquire it from a metadata write callback; no blob I/O runs under it.
++    private final Object blobLifetime = new Object();
++    private final Map<String, Integer> blobReaders = new LinkedHashMap<>();
++    private final Set<String> retiredBlobs = new LinkedHashSet<>();
+     private final List<ResourceEventListener> listeners = new CopyOnWriteArrayList<>();
+     private final List<ResourceCleanup> cleanups = new CopyOnWriteArrayList<>();
+     private final List<ResourceRelocation> relocations = new CopyOnWriteArrayList<>();
+@@ -200,7 +205,11 @@ public final class ResourceService {
+     public ReadResult read(String path, LwsPrincipal principal) {
+         String iri = pathToIri(path);
+         prepare(principal, iri, AclMode.READ);
+-        ReadResult loaded = rdf.read(conn -> {
++        return visibleRead(readMetadata(iri, principal), principal);
++    }
++
++    private ReadResult readMetadata(String iri, LwsPrincipal principal) {
++        return rdf.read(conn -> {
+             LwsResource meta = registry.find(conn, iri)
+                     .orElseThrow(() -> absent(principal, iri, AclMode.READ));
+             authorize(principal, iri, AclMode.READ);
+@@ -219,6 +228,9 @@ public final class ResourceService {
+                 }
+             }
+         });
++    }
++
++    private ReadResult visibleRead(ReadResult loaded, LwsPrincipal principal) {
+         // The container's entity-tag is the one persisted in the registry (refreshed by `touch`
+         // whenever its membership changes), NOT a hash of this rendering. A content-derived tag
+         // here could never match the value If-Match is evaluated against, which made conditional
+@@ -291,7 +303,101 @@ public final class ResourceService {
+         return container.withModified(now).withEtag(Etags.of(container.iri(), now.toString()));
+     }
+ 
+-    /** Open the bytes of a non-RDF resource. Caller closes the stream. */
++    /**
++     * A response snapshot whose immutable binary key stays reachable until close.
++     * The body opens lazily, so HEAD, 304 and rejected preconditions open no file.
++     * Always use a try-with-resources scope, including when response writing fails.
++     */
++    public final class ReadHandle implements AutoCloseable {
++        private final ReadResult result;
++        private final String binaryKey;
++        private InputStream stream;
++        private boolean closed;
++
++        private ReadHandle(ReadResult result, String binaryKey) {
++            this.result = result;
++            this.binaryKey = binaryKey;
++        }
++
++        public ReadResult result() { return result; }
++
++        public InputStream binary() throws IOException {
++            if (closed || binaryKey == null) {
++                throw new IOException("No open binary response snapshot");
++            }
++            if (stream == null) { stream = blobs.read(binaryKey); }
++            return stream;
++        }
++
++        @Override
++        public void close() throws IOException {
++            if (closed) { return; }
++            closed = true;
++            try {
++                if (stream != null) { stream.close(); }
++            } finally {
++                if (binaryKey != null) { releaseBlob(binaryKey); }
++            }
++        }
++    }
++
++    /**
++     * Load HTTP metadata and pin its binary version before a writer can retire it.
++     * An older ambient transaction could name an already-retired key, so response
++     * snapshots must begin here, outside a caller-owned metadata transaction.
++     * Authorization preparation and subsequent blob I/O stay outside the guard.
++     */
++    public ReadHandle openRead(String path, LwsPrincipal principal, boolean withBody) {
++        if (rdf.inUnitOfWork()) {
++            throw new IllegalStateException("Response snapshots must start outside a metadata transaction");
++        }
++        String iri = pathToIri(path);
++        prepare(principal, iri, AclMode.READ);
++        ReadResult loaded;
++        String key = null;
++        synchronized (blobLifetime) {
++            loaded = readMetadata(iri, principal);
++            if (withBody && !loaded.isRdf() && !loaded.isContainer()) {
++                key = loaded.meta().binaryKey();
++                if (key != null) { blobReaders.merge(key, 1, Integer::sum); }
++            }
++        }
++        // Only container visibility can do more authorization work, and a
++        // container has no binary pin to leak if that preparation fails.
++        return new ReadHandle(visibleRead(loaded, principal), key);
++    }
++
++    private void releaseBlob(String key) {
++        boolean discard = false;
++        synchronized (blobLifetime) {
++            int count = blobReaders.get(key);
++            if (count == 1) {
++                blobReaders.remove(key);
++                discard = retiredBlobs.remove(key);
++            } else {
++                blobReaders.put(key, count - 1);
++            }
++        }
++        if (discard) { discardBlobs(List.of(key), "superseded"); }
++    }
++
++    /** Defer only versions actually pinned by responses; other obsolete keys go now. */
++    private void retireBlobs(List<String> keys) {
++        List<String> discard = new ArrayList<>();
++        synchronized (blobLifetime) {
++            for (String key : keys) {
++                if (blobReaders.containsKey(key)) { retiredBlobs.add(key); }
++                else { discard.add(key); }
++            }
++        }
++        discardBlobs(discard, "superseded");
++    }
++
++    /**
++     * Open bytes for an existing metadata object; caller closes the stream.
++     * This does not pin an earlier metadata snapshot. HTTP responses must use
++     * {@link #openRead} so a concurrent replacement cannot retire their version.
++     */
+     public InputStream openBinary(LwsResource meta) throws IOException {
+         return blobs.read(meta.binaryKey());
+     }
+@@ -322,7 +428,7 @@ public final class ResourceService {
+             discardBlobs(changes.staged, "uncommitted");
+             throw e;
+         }
+-        discardBlobs(changes.obsolete, "superseded");
++        retireBlobs(changes.obsolete);
+         return result;
+     }
+ 
+@@ -1423,7 +1529,7 @@ public final class ResourceService {
+                 existing.map(LwsResource::binaryKey).filter(java.util.Objects::nonNull)
+                         .ifPresent(blobChanges.obsolete::add);
+                 String ct = req.contentType() == null ? "application/octet-stream"
+-                        : RdfFormats.stripParameters(req.contentType());
++                        : req.contentType();
+                 return new LwsResource(iri, ResourceType.NON_RDF_SOURCE, parentIri, created, modified,
+                         staged.sha256Hex().substring(0, 16), ct, staged.size(), staged.key(), owner,
+                         staged.sha256Hex());
+diff --git a/src/main/java/com/ebremer/lws/server/http/LwsResourceServlet.java b/src/main/java/com/ebremer/lws/server/http/LwsResourceServlet.java
+index 6c568ec..65aec41 100644
+--- a/src/main/java/com/ebremer/lws/server/http/LwsResourceServlet.java
++++ b/src/main/java/com/ebremer/lws/server/http/LwsResourceServlet.java
+@@ -31,6 +31,7 @@ import com.ebremer.lws.server.core.ResourceRegistry.ChildRef;
+ import com.ebremer.lws.server.core.ResourceService;
+ import com.ebremer.lws.server.core.ResourceService.PutOutcome;
+ import com.ebremer.lws.server.core.ResourceService.ReadResult;
++import com.ebremer.lws.server.core.ResourceService.ReadHandle;
+ import com.ebremer.lws.server.core.ResourceService.WriteRequest;
+ import com.ebremer.lws.server.core.ResourceType;
+ import com.ebremer.lws.server.rdf.RdfFormats;
+@@ -145,9 +146,9 @@ public final class LwsResourceServlet extends HttpServlet {
+             storageDescription.serve(req, resp, writeBody);
+             return;
+         }
+-        ReadResult rr;
++        ReadHandle opened;
+         try {
+-            rr = service.read(path, principal);
++            opened = service.openRead(path, principal, writeBody);
+         } catch (LwsException refused) {
+             // Nothing readable here. If a resource was moved away from this IRI and the caller may
+             // read it where it went, say where (lws10-core, Moving Resources); otherwise refuse
+@@ -157,6 +158,14 @@ public final class LwsResourceServlet extends HttpServlet {
+             }
+             throw refused;
+         }
++        try (opened) {
++            handleOpenedRead(req, resp, opened, writeBody);
++        }
++    }
++
++    private void handleOpenedRead(HttpServletRequest req, HttpServletResponse resp,
++            ReadHandle opened, boolean writeBody) throws IOException {
++        ReadResult rr = opened.result();
+         LwsResource meta = rr.meta();
+         if (rr.isContainer()) {
+             handleContainerRead(req, resp, meta, rr, writeBody);
+@@ -193,7 +202,7 @@ public final class LwsResourceServlet extends HttpServlet {
+             resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+             return;
+         }
+-        writeBinary(req, resp, meta, writeBody);
++        writeBinary(req, resp, meta, opened, writeBody);
+     }
+ 
+     /**
+@@ -394,7 +403,8 @@ public final class LwsResourceServlet extends HttpServlet {
+     }
+ 
+     /** Serve a non-RDF resource, honouring a single HTTP byte range (RFC 7233). */
+-    private void writeBinary(HttpServletRequest req, HttpServletResponse resp, LwsResource meta, boolean writeBody)
++    private void writeBinary(HttpServletRequest req, HttpServletResponse resp, LwsResource meta,
++            ReadHandle opened, boolean writeBody)
+             throws IOException {
+         if (RdfFormats.isJson(meta.contentType())) {
+             resp.setHeader("Accept-Patch", HttpSupport.ACCEPT_PATCH_JSON);
+@@ -418,10 +428,9 @@ public final class LwsResourceServlet extends HttpServlet {
+             addBinaryDigests(req, resp, meta, true);
+             resp.setContentLengthLong(length);
+             if (writeBody) {
+-                try (InputStream in = service.openBinary(meta)) {
+-                    in.skipNBytes(start);
+-                    copy(in, resp.getOutputStream(), length);
+-                }
++                InputStream in = opened.binary();
++                in.skipNBytes(start);
++                copy(in, resp.getOutputStream(), length);
+             }
+             return;
+         }
+@@ -430,9 +439,7 @@ public final class LwsResourceServlet extends HttpServlet {
+             resp.setContentLengthLong(size);
+         }
+         if (writeBody) {
+-            try (InputStream in = service.openBinary(meta)) {
+-                in.transferTo(resp.getOutputStream());
+-            }
++            opened.binary().transferTo(resp.getOutputStream());
+         }
+     }
+ 
+diff --git a/src/test/java/com/ebremer/lws/server/http/BinaryReadLifetimeTest.java b/src/test/java/com/ebremer/lws/server/http/BinaryReadLifetimeTest.java
+new file mode 100644
+index 0000000..efb90c3
+--- /dev/null
++++ b/src/test/java/com/ebremer/lws/server/http/BinaryReadLifetimeTest.java
+@@ -0,0 +1,274 @@
++package com.ebremer.lws.server.http;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Path;
++import java.time.Clock;
++import java.util.Properties;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Semaphore;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import jakarta.servlet.ServletOutputStream;
++import jakarta.servlet.WriteListener;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import org.apache.jena.query.DatasetFactory;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import com.ebremer.lws.server.LwsConfiguration;
++import com.ebremer.lws.server.core.IfMatch;
++import com.ebremer.lws.server.core.LwsPrincipal;
++import com.ebremer.lws.server.core.LwsResource;
++import com.ebremer.lws.server.core.ResourceRegistry;
++import com.ebremer.lws.server.core.ResourceService;
++import com.ebremer.lws.server.rdf.Tdb2RdfStore;
++import com.ebremer.lws.server.storage.BinaryStore;
++import com.ebremer.lws.server.storage.FileSystemBinaryStore;
++
++/** Real servlet/metadata/blob paths, with deterministic pauses before filesystem open. */
++class BinaryReadLifetimeTest {
++    private static final String TYPE = "application/json; charset=UTF-8";
++    private static final String OLD = "{ \"title\": \"old\" }\n";
++    private static final String NEW = "{ \"title\": \"new\" }\n";
++    private static final LwsPrincipal OWNER = new LwsPrincipal("https://owner.example/#me", null, null);
++    private ResourceService service;
++    private Tdb2RdfStore store;
++    private LwsResourceServlet servlet;
++    private BlockingBlobs blobs;
++
++    @BeforeEach
++    void setup(@TempDir Path directory) {
++        Properties p = new Properties();
++        p.setProperty("lws.base-uri", "http://example.org");
++        p.setProperty("lws.owners", OWNER.webId());
++        p.setProperty("lws.data-dir", directory.toString());
++        LwsConfiguration config = LwsConfiguration.of(p);
++        blobs = new BlockingBlobs(new FileSystemBinaryStore(config.blobDir()));
++        store = new Tdb2RdfStore(DatasetFactory.createTxnMem());
++        service = new ResourceService(store, blobs,
++                new ResourceRegistry(), (principal, iri, mode) -> true, config, Clock.systemUTC());
++        service.ensureStorageRoot();
++        servlet = new LwsResourceServlet(service, config, null, null);
++    }
++
++    private ResourceService.WriteRequest json(String value) {
++        return new ResourceService.WriteRequest(TYPE, value.getBytes(StandardCharsets.UTF_8), null, null);
++    }
++
++    private LwsResource original() {
++        service.put("/doc.json", OWNER, json(OLD));
++        return service.stat("/doc.json").orElseThrow();
++    }
++
++    private HttpServletRequest request(String method) {
++        HttpServletRequest request = mock(HttpServletRequest.class);
++        when(request.getMethod()).thenReturn(method);
++        when(request.getRequestURI()).thenReturn("/doc.json");
++        when(request.getContextPath()).thenReturn("");
++        return request;
++    }
++
++    private HttpServletResponse response(ByteArrayOutputStream body, Runnable beforeWrite) throws IOException {
++        HttpServletResponse response = mock(HttpServletResponse.class);
++        when(response.getOutputStream()).thenReturn(new ServletOutputStream() {
++            @Override public void write(int b) throws IOException {
++                if (beforeWrite != null) { beforeWrite.run(); throw new IOException("Client disconnected"); }
++                body.write(b);
++            }
++            @Override public boolean isReady() { return true; }
++            @Override public void setWriteListener(WriteListener listener) {}
++        });
++        return response;
++    }
++
++    private CompletableFuture<String> get(java.util.concurrent.Executor executor) {
++        String etag = service.stat("/doc.json").orElseThrow().quotedEtag();
++        return CompletableFuture.supplyAsync(() -> {
++            ByteArrayOutputStream body = new ByteArrayOutputStream();
++            try {
++                HttpServletResponse response = response(body, null);
++                servlet.service(request("GET"), response);
++                verify(response).setHeader("ETag", etag);
++            } catch (IOException e) { throw new java.io.UncheckedIOException(e); }
++            return body.toString(StandardCharsets.UTF_8);
++        }, executor);
++    }
++
++    @Test
++    void replacementKeepsTheSnapshotBlobUntilItsLastReaderCloses() throws Exception {
++        LwsResource old = original();
++        blobs.pause(2);
++        try (var executor = Executors.newFixedThreadPool(2)) {
++            var first = get(executor);
++            var second = get(executor);
++            try {
++                assertTrue(blobs.entered.await(10, TimeUnit.SECONDS), "both GETs must reach blob open");
++                service.put("/doc.json", OWNER, json(NEW), IfMatch.of(old.etag()));
++                // The writer has already returned: streaming readers must not hold the writer lock.
++                blobs.release.release();
++                assertEquals(OLD, CompletableFuture.anyOf(first, second).get(10, TimeUnit.SECONDS));
++                assertTrue(blobs.exists(old.binaryKey()), "the other reader still needs the old blob");
++            } finally { blobs.release.release(2); }
++            assertEquals(OLD, first.get(10, TimeUnit.SECONDS));
++            assertEquals(OLD, second.get(10, TimeUnit.SECONDS));
++        }
++        assertFalse(blobs.exists(old.binaryKey()), "last reader must promptly reclaim the retired blob");
++        assertTrue(blobs.exists(service.stat("/doc.json").orElseThrow().binaryKey()));
++    }
++
++    @Test
++    void deletionCannotRetireAResponseSnapshotBeforeTheFileIsOpened() throws Exception {
++        LwsResource old = original();
++        blobs.pause(1);
++        try (var executor = Executors.newSingleThreadExecutor()) {
++            var pending = get(executor);
++            try {
++                assertTrue(blobs.entered.await(10, TimeUnit.SECONDS));
++                service.delete("/doc.json", OWNER);
++            } finally { blobs.release.release(); }
++            assertEquals(OLD, pending.get(10, TimeUnit.SECONDS));
++        }
++        assertTrue(service.stat("/doc.json").isEmpty());
++        assertFalse(blobs.exists(old.binaryKey()));
++    }
++
++    @Test
++    void notModifiedClosesTheSnapshotWithoutOpeningItsBody() throws Exception {
++        LwsResource old = original();
++        HttpServletRequest request = request("GET");
++        when(request.getHeader("If-None-Match")).thenReturn('"' + old.etag() + '"');
++        HttpServletResponse response = response(new ByteArrayOutputStream(), null);
++        doAnswer(call -> {
++            service.put("/doc.json", OWNER, json(NEW), IfMatch.of(old.etag()));
++            assertTrue(blobs.exists(old.binaryKey()), "snapshot remains pinned until response exit");
++            return null;
++        }).when(response).setStatus(304);
++        servlet.service(request, response);
++        verify(response).setStatus(304);
++        assertEquals(0, blobs.reads.get());
++        assertFalse(blobs.exists(old.binaryKey()));
++    }
++
++    @Test
++    void anOutputFailureStillReleasesTheRetiredBlob() throws Exception {
++        LwsResource old = original();
++        HttpServletResponse response = response(new ByteArrayOutputStream(), () -> {
++            service.put("/doc.json", OWNER, json(NEW), IfMatch.of(old.etag()));
++            assertTrue(blobs.exists(old.binaryKey()));
++        });
++        assertThrows(IOException.class, () -> servlet.service(request("GET"), response));
++        assertFalse(blobs.exists(old.binaryKey()));
++    }
++
++    @Test
++    void anOpenFailureStillReleasesTheRetiredBlob() throws Exception {
++        LwsResource old = original();
++        blobs.beforeFailure = () -> {
++            service.put("/doc.json", OWNER, json(NEW), IfMatch.of(old.etag()));
++            assertTrue(blobs.exists(old.binaryKey()));
++        };
++        assertThrows(IOException.class, () -> servlet.service(request("GET"), response(new ByteArrayOutputStream(), null)));
++        assertFalse(blobs.exists(old.binaryKey()));
++    }
++
++    @Test
++    void aSlowReaderDoesNotRetainUnrelatedObsoleteVersions() throws Exception {
++        LwsResource old = original();
++        service.put("/other.json", OWNER, json(OLD));
++        LwsResource other = service.stat("/other.json").orElseThrow();
++        blobs.pause(1);
++        try (var executor = Executors.newSingleThreadExecutor()) {
++            var pending = get(executor);
++            try {
++                assertTrue(blobs.entered.await(10, TimeUnit.SECONDS));
++                service.put("/other.json", OWNER, json(NEW), IfMatch.of(other.etag()));
++                assertFalse(blobs.exists(other.binaryKey()), "only the actual response key is retained");
++                service.put("/doc.json", OWNER, json(NEW), IfMatch.of(old.etag()));
++                assertTrue(blobs.exists(old.binaryKey()));
++            } finally { blobs.release.release(); }
++            assertEquals(OLD, pending.get(10, TimeUnit.SECONDS));
++        }
++        assertFalse(blobs.exists(old.binaryKey()));
++    }
++
++    @Test
++    void responseSnapshotsCannotReuseAnOlderAmbientMetadataTransaction() {
++        LwsResource old = original();
++        store.read(conn -> {
++            assertThrows(IllegalStateException.class, () -> service.openRead("/doc.json", OWNER, true));
++            return null;
++        });
++        service.put("/doc.json", OWNER, json(NEW), IfMatch.of(old.etag()));
++        assertFalse(blobs.exists(old.binaryKey()), "a refused response snapshot must not pin a blob");
++    }
++
++    @Test
++    void nonRdfHttpHeaderPreservesMediaParameters() throws Exception {
++        original();
++        var context = new org.eclipse.jetty.ee10.servlet.ServletContextHandler();
++        context.setContextPath("/");
++        context.addServlet(new org.eclipse.jetty.ee10.servlet.ServletHolder(servlet), "/*");
++        var server = new org.eclipse.jetty.server.Server(new java.net.InetSocketAddress("127.0.0.1", 0));
++        server.setHandler(context);
++        server.start();
++        try (var client = java.net.http.HttpClient.newHttpClient()) {
++            int port = ((org.eclipse.jetty.server.ServerConnector) server.getConnectors()[0]).getLocalPort();
++            var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:" + port + "/doc.json")).build();
++            var response = client.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
++            assertEquals(200, response.statusCode());
++            String mediaType = response.headers().firstValue("Content-Type").orElseThrow();
++            // Servlet containers can normalize optional whitespace and charset
++            // case; the actual parameter must survive, along with the bytes.
++            assertTrue(mediaType.matches("(?i)application/json;\\s*charset=utf-8"), mediaType);
++            assertEquals(OLD, response.body());
++        } finally { server.stop(); }
++    }
++
++    @Test
++    void nonRdfContentTypeParametersRoundTripWithoutChangingTheBytes() throws Exception {
++        LwsResource old = original();
++        assertEquals(TYPE, old.contentType());
++        ByteArrayOutputStream body = new ByteArrayOutputStream();
++        HttpServletResponse response = response(body, null);
++        servlet.service(request("GET"), response);
++        verify(response).setContentType(TYPE);
++        assertEquals(OLD, body.toString(StandardCharsets.UTF_8));
++        int reads = blobs.reads.get();
++        servlet.service(request("HEAD"), response(new ByteArrayOutputStream(), null));
++        assertEquals(reads, blobs.reads.get(), "HEAD must not open the body");
++    }
++
++    private static final class BlockingBlobs implements BinaryStore {
++        private final BinaryStore delegate;
++        private final AtomicInteger reads = new AtomicInteger();
++        private volatile CountDownLatch entered;
++        private volatile Semaphore release;
++        private volatile Runnable beforeFailure;
++        BlockingBlobs(BinaryStore delegate) { this.delegate = delegate; }
++        void pause(int readers) { entered = new CountDownLatch(readers); release = new Semaphore(0); }
++        @Override public InputStream read(String key) throws IOException {
++            reads.incrementAndGet();
++            if (entered != null) {
++                entered.countDown();
++                try {
++                    if (!release.tryAcquire(10, TimeUnit.SECONDS)) { throw new IOException("Reader barrier timed out"); }
++                } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IOException(e); }
++            }
++            if (beforeFailure != null) { beforeFailure.run(); throw new IOException("Injected open failure"); }
++            return delegate.read(key);
++        }
++        @Override public StoredBlob write(String key, InputStream data) throws IOException { return delegate.write(key, data); }
++        @Override public void delete(String key) throws IOException { delegate.delete(key); }
++        @Override public long size(String key) throws IOException { return delegate.size(key); }
++        @Override public boolean exists(String key) { return delegate.exists(key); }
++    }
++}
+
+base-commit: 97e8ace5f7b0da890b4f8cd96eadec505e1fb16e
+-- 
+2.52.0
+

@@ -15,6 +15,7 @@ function fixture(protectedPod = false) {
     [storage, () => response(desc)],
     [root, options => protectedPod && !new Headers(options.headers).has('Authorization') ? response(null, 401, { 'WWW-Authenticate': 'Bearer resource_metadata="' + metadata + '"' }) : response({ id: root, type: 'Container', items: [] })],
     [metadata, () => response({ resource: root, authorization_servers: [issuer] })],
+    ['https://pods.example/.well-known/oauth-protected-resource/data/', () => response(null, 404)],
     [issuer + '/.well-known/lws-configuration', () => response({ issuer, grant_types_supported: ['urn:ietf:params:oauth:grant-type:token-exchange'], token_endpoint: issuer + '/token' })],
     [issuer + '/token', () => response({ token_type: 'Bearer', access_token: 'secret-access-token', expires_in: 300 })]
   ]);
@@ -64,7 +65,7 @@ test('exchanges a subject credential for the storage audience, not the root', as
     return response({ hello: 'world' }, 200, { 'Content-Type': 'application/json', ETag: '"rev1"' });
   });
   const result = await backend.get('/a.json');
-  assert.deepEqual(result.body, { hello: 'world' });
+  assert.deepEqual(JSON.parse(result.body), { hello: 'world' });
   assert.equal(result.revision, 'rev1');
 });
 
@@ -143,4 +144,30 @@ test('disconnect cancels an in-flight credential acquisition', async () => {
   backend.configure({ userAddress: null }); release();
   await assert.rejects(connecting, /cancelled/);
   assert.equal(backend.connected, false);
+});
+
+test('a callback revalidates a public-root issuer before completing the connection', async () => {
+  const { backend, routes } = fixture();
+  const context = { storage, storageURL: storage, authorizationServer: issuer };
+  routes.set('https://pods.example/.well-known/oauth-protected-resource/data/', () =>
+    response({ resource: root, authorization_servers: [issuer] }));
+  backend.openID = { handleIncomingRedirect: async () => context, cancelPending() {}, clear() {} };
+  backend.setCredentialProvider(async () => ({ token: 'validated-subject', type: 'jwt' }));
+  assert.equal(await backend.handleIncomingRedirect(), true);
+  assert.equal(backend.connected, true);
+  assert.equal(backend.discovery.storage, storage);
+  assert.deepEqual(backend.discovery.authorizationServers, [issuer]);
+});
+
+test('a callback refuses an issuer changed in public-root metadata', async () => {
+  const { backend, routes, calls } = fixture();
+  const context = { storage, storageURL: storage, authorizationServer: issuer };
+  let cleared = false;
+  routes.set('https://pods.example/.well-known/oauth-protected-resource/data/', () =>
+    response({ resource: root, authorization_servers: ['https://other.example'] }));
+  backend.openID = { handleIncomingRedirect: async () => context, clear() { cleared = true; } };
+  await assert.rejects(backend.handleIncomingRedirect(), /authorization changed/);
+  assert.equal(cleared, true);
+  assert.equal(backend.connected, false);
+  assert.equal(calls.some(call => call.url.endsWith('/token')), false);
 });

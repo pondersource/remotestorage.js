@@ -36,6 +36,7 @@ jobs:
         continue-on-error: true
         run: node scripts/run-lwsd-interop.mjs
   transactional-server:
+    name: Patched transactional LWS server
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +55,12 @@ jobs:
           distribution: temurin
           java-version: 25
           cache: maven
-      - run: mvn -B -q -f .lws-server/pom.xml -Dmaven.test.skip=true package
+      - name: Apply reviewed provider source fixes to the pinned upstream revision
+        run: |
+          git -C .lws-server apply --check ../test/fixtures/lws-server/read-lifetimes.patch
+          git -C .lws-server apply ../test/fixtures/lws-server/read-lifetimes.patch
+      - name: Verify and build the patched provider, including its regression tests
+        run: mvn -B -q -f .lws-server/pom.xml verify
       - run: npm ci --ignore-scripts
       - run: npm run build:js
       - run: npm run build:all
@@ -63,3 +69,25 @@ jobs:
         env:
           LWS_SERVER_KIND: ebremer
         run: node scripts/run-lwsd-interop.mjs
+  css-public-discovery:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/checkout@v4
+        with:
+          repository: jeswr/CommunitySolidServer
+          ref: ef6d664f1253662cbfcb0f1786fe45d32849e067
+          path: .css-lws
+          persist-credentials: false
+      - run: npm ci --ignore-scripts
+      - run: npm run build:js
+      - run: npm ci --prefix .css-lws --ignore-scripts
+      - run: npm run build --prefix .css-lws
+      - name: Real CSS-LWS public-root auth discovery and native index projection
+        env:
+          LWS_CSS_SERVER_DIR: .css-lws
+        run: node --test test/lws-css-auth.test.mjs

@@ -157,3 +157,41 @@ test('a lost creation acknowledgement exposes both conflict candidates without r
   await page.evaluate(() => notes.remove('uncertain.txt'));
   await expect.poll(() => fileBodies('/notes/uncertain.txt'), { timeout: 20000 }).toEqual([]);
 });
+
+test('JSON edits survive revalidation after an acknowledgement without an ETag', async ({ page, browser }) => {
+  await connect(page);
+  await page.evaluate(() => {
+    notes.declareType('note', { type: 'object', properties: { title: { type: 'string' } } });
+    const request = rs.lws.request;
+    rs.lws.request = async (url, init) => {
+      const response = await request(url, init);
+      if (!['POST', 'PUT'].includes(init?.method) || !response.ok) return response;
+      const headers = new Headers(response.headers); headers.delete('etag');
+      const body = [204, 205].includes(response.status) ? null : await response.arrayBuffer();
+      return new Response(body, { status: response.status, headers });
+    };
+    return notes.storeObject('note', 'etagless.json', { title: 'first' });
+  });
+  await expect.poll(() => page.evaluate(async () => {
+    const node = (await rs.local.getNodes(['/notes/etagless.json']))['/notes/etagless.json'];
+    return node?.common?.body && JSON.parse(node.common.body).title === 'first' && !node.local && !node.push;
+  }), { timeout: 20000 }).toBe(true);
+  await page.evaluate(async () => {
+    rs.stopSync();
+    await notes.storeObject('note', 'etagless.json', { title: 'second' });
+    rs.startSync();
+  });
+  await expect.poll(async () => {
+    const bodies = await fileBodies('/notes/etagless.json');
+    return bodies.length ? JSON.parse(bodies[0]).title : undefined;
+  }, { timeout: 20000 }).toBe('second');
+  expect(await page.evaluate(() => window.conflicts)).toEqual([]);
+  expect(await page.evaluate(async () => (await notes.getObject('etagless.json')).title)).toBe('second');
+  const fresh = await browser.newContext();
+  try {
+    const next = await fresh.newPage(); await connect(next);
+    await expect.poll(() => next.evaluate(async () => (await notes.getObject('etagless.json'))?.title), { timeout: 20000 }).toBe('second');
+  } finally { await fresh.close(); }
+  await page.evaluate(() => notes.remove('etagless.json'));
+  await expect.poll(() => fileBodies('/notes/etagless.json'), { timeout: 20000 }).toEqual([]);
+});

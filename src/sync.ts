@@ -10,6 +10,7 @@ import log from './log';
 import Authorize from './authorize';
 import SyncError from './sync-error';
 import UnauthorizedError from './unauthorized-error';
+import { equalContentTypes } from './content-type';
 import {
   applyMixins,
   deepClone,
@@ -86,7 +87,7 @@ function hasNoRemoteChanges (node: RSNode): boolean {
          // A nonempty, unfetched revision has no body. Two unknown bodies are
          // not evidence of equality: keep that marker for the next fetch.
          ((!node.remote.revision || node.remote.body !== undefined) && equal(node.remote.body, node.common.body) &&
-          node.remote.contentType === node.common.contentType);
+          equalContentTypes(node.remote.contentType, node.common.contentType));
 }
 
 function mergeMutualDeletion (node: RSNode): RSNode {

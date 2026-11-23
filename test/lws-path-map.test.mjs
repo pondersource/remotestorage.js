@@ -18,7 +18,7 @@ test('create, reload, list, update and delete work with opaque server-assigned U
   assert.ok((await lws.get('/notes/drafts/')).body['a.json']);
   lws = await client(server);
   const loaded = await lws.get('/notes/drafts/a.json');
-  assert.deepEqual(loaded.body, { title: 'first' });
+  assert.deepEqual(JSON.parse(loaded.body), { title: 'first' });
   assert.equal(lws.getFileURL('/notes/drafts/a.json'), url);
   assert.equal((await lws.put('/notes/drafts/a.json', '{"title":"second"}', 'application/json', { ifMatch: loaded.revision })).statusCode, 204);
   assert.equal((await lws.delete('/notes/drafts/a.json', { ifMatch: loaded.revision })).statusCode, 412);
@@ -94,4 +94,67 @@ test('existing native files and foreign opaque resources survive rs.js writes', 
   assert.deepEqual(Object.keys((await a.get('/')).body).sort(), ['existing.txt', 'notes/']);
   assert.equal(server.resources.get(server.base + '/foreign').body, 'another app');
   assert.equal(server.resources.get(server.base + '/root/existing.txt').body, 'existing native file');
+});
+
+
+function unknownFormats(server, headStatus) {
+  const send = server.fetch || globalThis.fetch;
+  return { ...server, fetch: async (url, init = {}) => {
+    if (init.method === 'HEAD' && headStatus) { return new Response(null, { status: headStatus }); }
+    const response = await send(url, init);
+    if ((!init.method || init.method === 'GET') && response.headers.get('content-type') === 'application/lws+json') {
+      const data = await response.json();
+      data.items = data.items.map(item => ({ ...item, format: 'application/octet-stream' }));
+      return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+    }
+    return response;
+  } };
+}
+
+test('unknown listing formats are resolved by HEAD without replacing native resources or duplicating the index', async t => {
+  const server = await createServer(); t.after(server.close);
+  server.resources.set(server.base + '/native', { type: 'application/octet-stream', body: 'native bytes', revision: 100 });
+  const projected = unknownFormats(server);
+  const a = await client(projected);
+  await a.put('/note', 'first', 'text/plain', { ifNoneMatch: '*' });
+  const b = await client(projected);
+  const before = await b.get('/note');
+  assert.equal(before.body, 'first');
+  await b.put('/note', 'second', 'text/plain', { ifMatch: before.revision });
+  assert.equal((await a.get('/note')).body, 'second');
+  assert.equal([...server.resources.values()].filter(record => record.type === media).length, 1);
+  assert.equal(server.resources.get(server.base + '/native').body, 'native bytes');
+  assert.equal(server.requests.some(request => request.path === '/native' && request.method === 'GET'), false);
+  assert.ok(server.requests.some(request => request.path === '/native' && request.method === 'HEAD'));
+});
+
+test('unknown listing formats still refuse multiple valid indexes', async t => {
+  const server = await createServer(); t.after(server.close);
+  const a = await client(server); await a.put('/seed', 'seed', 'text/plain');
+  const index = [...server.resources.values()].find(record => record.type === media);
+  server.resources.set(server.base + '/duplicate', { ...index });
+  await assert.rejects(client(unknownFormats(server)), /Multiple/);
+});
+
+for (const status of [401, 500]) test('failed HEAD discovery (' + status + ') cannot create a new index', async t => {
+  const server = await createServer(); t.after(server.close);
+  server.resources.set(server.base + '/unknown', { type: 'application/octet-stream', body: 'unreadable', revision: 100 });
+  await assert.rejects(client(unknownFormats(server, status)), /Cannot discover.*HTTP /);
+  assert.equal(server.requests.some(request => request.method === 'POST'), false);
+});
+
+test('unknown member media discovery is bounded to four HEAD requests at once', async t => {
+  const server = await createServer(); t.after(server.close);
+  for (let i = 0; i < 9; i++) server.resources.set(server.base + '/binary-' + i, { type: 'application/octet-stream', body: 'bytes', revision: 100 + i });
+  const projected = unknownFormats(server), send = projected.fetch;
+  let active = 0, maximum = 0;
+  projected.fetch = async (url, init = {}) => {
+    if (init.method !== 'HEAD') return send(url, init);
+    active++; maximum = Math.max(maximum, active);
+    try { await new Promise(resolve => setImmediate(resolve)); return await send(url, init); }
+    finally { active--; }
+  };
+  await client(projected);
+  assert.equal(maximum, 4);
+  assert.equal(active, 0);
 });

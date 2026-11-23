@@ -118,9 +118,11 @@ signed test tokens. `node --test test/lws*.test.mjs` requires the TypeScript bui
 
 ## Independent server interoperability
 
-The required independent-server job builds **ebremer/lws-server** at
-`97e8ace5f7b0da890b4f8cd96eadec505e1fb16e` with JDK 25 and its transactional
-TDB2 backend. It runs in open test mode on loopback with temporary data and
+The required independent-server job builds **ebremer/lws-server** from
+`97e8ace5f7b0da890b4f8cd96eadec505e1fb16e` with the reviewed
+[provider source patch](https://github.com/pondersource/remotestorage.js/tree/distribution/test/fixtures/lws-server), JDK 25 and its
+transactional TDB2 backend. It runs the full provider Maven verification before
+the SDK contract. It runs in open test mode on loopback with temporary data and
 allows CORS only for the test app origin. Run the same harness with
 `LWS_SERVER_KIND=ebremer` and a built checkout at `.lws-server/`.
 
@@ -142,9 +144,13 @@ A local run on 2026-11-23 also exposed an independent race in that pinned Java
 server: the concurrent-writer test received HTTP 500 with `NoSuchFileException`
 when an index reader tried to open a blob retired by another write. Its metadata
 transaction does not by itself protect the old blob's lifetime. Both browser
-recovery cases passed against it, but the host race must be fixed before this
-pin is treated as a safe writable target. The required check remains blocking;
-the adapter does not conceal the failure with unconditional writes or retries.
+recovery cases passed against it. The checked-in provider patch now pins response
+blob versions until their last reader closes and preserves non-RDF Content-Type
+parameters. Nine deterministic provider regressions cover those changes; the
+actual patched-host run passed both CRUD/concurrency cases and all three browser
+cases. These results apply to the explicitly patched fixture. The unmodified
+upstream revision still needs the fix; the adapter does not conceal its failure
+with unconditional writes or retries.
 
 The runner waits for discovery to respond, runs CRUD/conditional-write and
 concurrent-writer checks, and then runs the actual rs.js browser cache journey
@@ -168,3 +174,72 @@ npm run test:lws:interop
 This open-mode target exercises storage and browser/CORS interoperability. It
 does not establish real-provider OpenID interoperability; the signed-token and
 PKCE tests cover that flow separately with controlled identity responses.
+For the Java target, the runner explicitly disables the otherwise enabled
+embedded authorization server and any trusted issuers, and checks that protected
+resource metadata returns 404. Anonymous test access is an intentional server
+configuration on disposable loopback, rather than a client authentication bypass.
+
+## Public roots and projected member types
+
+A public storage root does not imply anonymous access to the app's private
+resources. If neither the supplied resource nor its root sends a metadata
+challenge, discovery also queries the RFC 9728 protected-resource metadata URL
+for that exact resource path and query. The metadata must identify that exact
+resource and advertise valid authorization servers. Only a missing metadata
+endpoint (404 or 410) permits open-mode fallback; denied, malformed or failed
+metadata requests do not silently downgrade authentication. This lookup also
+keeps the storage/issuer binding reproducible after the OpenID redirect.
+For an origin-root resource, the metadata URL omits the root-only slash, as
+RFC 9728 section 3.1 requires; a query is preserved.
+
+Some container listings project a custom member media type as
+`application/octet-stream`. Index discovery uses at most four concurrent HEAD
+requests for members with missing/generic types, checks their actual media type,
+and then validates the index document's media type, version, storage and entries.
+It does not inspect arbitrary binary/JSON bodies to guess which file is an
+index, and still stops if multiple indexes are present. A failed metadata HEAD
+cannot be treated as an absent index and cause another index to be created.
+
+The `css-public-discovery` CI job builds CSS-LWS at
+`ef6d664f1253662cbfcb0f1786fe45d32849e067` and reproduces these two real server
+behaviors on a disposable loopback Pod. Its index API test uses an explicitly
+public writable test namespace; it does not certify private access or complete
+OpenID login. Run it against an installed/built checkout with:
+
+```sh
+LWS_CSS_SERVER_DIR=/path/to/CommunitySolidServer node --test test/lws-css-auth.test.mjs
+```
+
+An OpenID client registration and the configured `idTokenSigningAlg` must agree
+with the chosen identity provider. For example, the pinned CSS-LWS fixture uses
+an explicitly registered ES256 client and `idTokenSigningAlg: 'ES256'`; the
+adapter's default is RS256. Scopes and token claims remain verified by the
+normal OpenID/token-exchange path.
+
+## JSON readback after a write
+
+Some servers acknowledge a successful write without an ETag. Before the next
+conditional mutation, Sync fetches the acknowledged content and adopts its
+validator only if the bytes and media type still match. LWS returns JSON as
+serialized text, matching the cached `storeObject` body and WireClient's
+transport contract; `BaseClient.getObject` performs the JSON parsing. Parsing
+inside the backend would turn unchanged text into an object, falsely report a
+conflict, and discard the pending edit through normal conflict handling.
+
+HTTP containers can legally normalize the spelling of Content-Type. Sync
+compares media type and parameter names without case, and charset values
+without case, honoring optional whitespace, quoted values and parameter order.
+Unknown values, profiles and multipart boundaries remain significant and
+case-sensitive. For `application/json` only, an explicit UTF-8 charset is also
+equivalent to its omission: RFC 8259 defines no charset parameter and requires
+UTF-8 for interoperable exchange. Other encodings/types receive no such default.
+Malformed or duplicate parameters cannot be
+treated as equivalent by this normalization. The acknowledged bytes and all
+existing revision guards still have to match before adopting a validator.
+
+The browser regression covers JSON creation, a subsequent edit, and retrieval
+in a fresh browser after suppressing write-response ETags. The separate lost
+acknowledgement case still retains genuinely different conflict candidates.
+The OneDrive/Nextgraph shared record decoder follows the same text contract;
+their adapter-boundary tests exercise actual Sync cache revalidation, without
+claiming live Microsoft or wallet/broker acceptance.

@@ -11,6 +11,7 @@ const port = process.env.LWSD_PORT || (java ? '3127' : '3126');
 const url = 'http://127.0.0.1:' + port + (java ? '/' : '/lws/');
 const server = java
   ? spawn('java', ['-Dserver.address=127.0.0.1', '-Dlws.base-uri=' + url, '-Dlws.listen-port=' + port, '-Dlws.dev.open=true', '-Dlws.public-read=true', '-Dlws.data-dir=' + data,
+    '-Dlws.oauth.enabled=false', '-Dlws.oauth.trusted-issuers=',
     '-Dlws.cors.allowed-origins=http://127.0.0.1:42123', '-jar', join(checkout, 'target/lws-server.jar')], { stdio: 'inherit' })
   : spawn(process.execPath, [join(checkout, 'index.js'), '--no-auth', '--host', '127.0.0.1', '--port', port, '--root', data], { stdio: 'inherit' });
 let spawnError;
@@ -30,6 +31,12 @@ try {
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   if (!ready) throw new Error('LWSD did not become ready.');
+  if (java) {
+    // This target deliberately tests anonymous storage on disposable loopback.
+    // Do not advertise an unused embedded AS and then bypass client sign-in.
+    const metadata = await fetch(new URL('/.well-known/oauth-protected-resource', url));
+    if (metadata.status !== 404) throw new Error('The open-mode fixture must expose no authorization server (HTTP ' + metadata.status + ').');
+  }
   const failures = [];
   try { await run(['--test', 'test/lws-interop.test.mjs']); } catch (error) { failures.push(error); }
   try { await run(['node_modules/@playwright/test/cli.js', 'test', '--config=playwright.lws.config.cjs']); } catch (error) { failures.push(error); }
