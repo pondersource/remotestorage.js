@@ -46,12 +46,39 @@ class OneDrive extends RemoteBase implements Remote {
     if (redirect.origin !== window.location.origin || redirect.hash || redirect.username || redirect.password) {
       throw new Error('The OneDrive redirect URI must belong to this app origin and have no fragment.');
     }
+    // Optional provider configuration must not initialize MSAL or require Web
+    // Crypto. Guest mode and other backends can run on an insecure development
+    // origin. Reconfiguration also invalidates an in-flight connection attempt.
+    this.generation++;
     this.clientId = clientId;
     this.redirectUri = redirect.href;
-    this.auth = new PublicClientApplication({ auth: { clientId,
-      authority: 'https://login.microsoftonline.com/consumers', redirectUri: this.redirectUri },
-    cache: { cacheLocation: 'memoryStorage' } });
-    this.initialized = this.auth.initialize();
+    this.auth = undefined;
+    this.initialized = undefined;
+    this.account = undefined;
+    this.root = undefined;
+    this.userAddress = undefined;
+  }
+
+  private async initializeAuth(): Promise<IPublicClientApplication> {
+    if (!this.auth) {
+      if (!globalThis.crypto?.subtle) {
+        throw new Error('OneDrive sign-in requires Web Crypto in a secure context (HTTPS or localhost).');
+      }
+      this.auth = new PublicClientApplication({ auth: { clientId: this.clientId,
+        authority: 'https://login.microsoftonline.com/consumers', redirectUri: this.redirectUri },
+      cache: { cacheLocation: 'memoryStorage' } });
+    }
+    const auth = this.auth;
+    try {
+      this.initialized ||= auth.initialize();
+      await this.initialized;
+    } catch (error) {
+      // A failed initialization is recoverable on a later explicit attempt;
+      // it cannot reset a replacement registration's initialization state.
+      if (this.auth === auth) { this.auth = undefined; this.initialized = undefined; }
+      throw error;
+    }
+    return auth;
   }
 
   configure(settings: RemoteSettings): void {
@@ -64,25 +91,39 @@ class OneDrive extends RemoteBase implements Remote {
     if (settings.userAddress === null) {
       this.userAddress = undefined;
       // Local disconnect never signs out of the user's Microsoft account globally.
-      if (this.auth) { void this.auth.clearCache(); }
+      if (this.auth) {
+        const auth = this.auth, initialized = this.initialized, generation = this.generation;
+        this.auth = undefined;
+        this.initialized = undefined;
+        // Initialization and cleanup can overlap after an explicit cancellation.
+        // A reconnect gets a new client so old cleanup cannot clear new tokens.
+        void Promise.resolve(initialized).then(() => auth.clearCache()).catch(error => {
+          if (this.rs.onedrive === this && generation === this.generation) { this.rs._emit('error', error); }
+        });
+      }
     }
   }
 
   /** User gesture required: opens Microsoft's account chooser in a popup. */
   async connect(): Promise<void> {
     if (this.rs.remote.connected) { throw new Error('Disconnect the current storage before connecting OneDrive.'); }
-    if (!this.auth) { throw new Error('Configure a OneDrive SPA client ID before connecting.'); }
+    if (!this.clientId) { throw new Error('Configure a OneDrive SPA client ID before connecting.'); }
     const generation = ++this.generation;
-    await this.initialized;
+    const auth = await this.initializeAuth();
+    if (generation !== this.generation) { throw new Error('OneDrive connection was cancelled.'); }
     // The registered popup callback may load the app itself. Leave its OAuth
     // parameters to MSAL, including before rs.backend has been selected.
+    let popup: string;
     if (typeof sessionStorage !== 'undefined') {
       const callback = new URL(this.redirectUri);
-      sessionStorage.setItem(POPUP_KEY, JSON.stringify({ url: callback.origin + callback.pathname, created: Date.now() }));
+      popup = JSON.stringify({ url: callback.origin + callback.pathname, created: Date.now(), generation });
+      sessionStorage.setItem(POPUP_KEY, popup);
     }
     let login;
-    try { login = await this.auth.loginPopup({ scopes: SCOPES, prompt: 'select_account' }); }
-    finally { if (typeof sessionStorage !== 'undefined') { sessionStorage.removeItem(POPUP_KEY); } }
+    try { login = await auth.loginPopup({ scopes: SCOPES, prompt: 'select_account' }); }
+    finally {
+      if (popup && sessionStorage.getItem(POPUP_KEY) === popup) { sessionStorage.removeItem(POPUP_KEY); }
+    }
     if (generation !== this.generation) { throw new Error('OneDrive connection was cancelled.'); }
     this.account = login.account;
     if (!this.account) { throw new Error('Microsoft did not return an account.'); }

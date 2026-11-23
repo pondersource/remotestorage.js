@@ -3,7 +3,7 @@
 <title>OneDrive backend test</title>
 <style>body{font:18px system-ui;max-width:52rem;margin:3rem auto;padding:1rem}button,input{font:inherit;padding:.5rem}pre{white-space:pre-wrap}#widget{margin-top:2rem}</style>
 <h1>OneDrive backend test</h1>
-<p>Connect a personal Microsoft account, then run the test. It creates randomly named test records in this application's OneDrive folder, checks readback and conflicts, and removes those records afterwards.</p>
+<p>Connect a personal Microsoft account, then run the test. Sign-in requires HTTPS or localhost; configuring this optional backend alone never starts authentication. It creates randomly named test records in this application's OneDrive folder, checks readback and conflicts, and removes those records afterwards.</p>
 <button id="run" disabled>Run storage checks</button>
 <pre id="status" role="status">Choose OneDrive in the storage widget.</pre><div id="widget"></div>
 <script src="/remotestorage-all.js"></script><script src="/widget.js"></script>

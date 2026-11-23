@@ -12,6 +12,7 @@ function fixture() {
   const backend = new OneDrive(rs);
   backend.auth = { async loginPopup() { return { account: { username: 'alice@example.test' } }; },
     async acquireTokenSilent() { return { accessToken: 'graph-test-token' }; }, async clearCache() {} };
+  backend.clientId = 'test-client-id';
   backend.initialized = Promise.resolve();
   backend.redirectUri = 'https://app.example.test/';
   const routes = new Map();
@@ -27,6 +28,109 @@ const json = (body, status = 200) => new Response(body === null ? null : JSON.st
 const item = 'https://graph.microsoft.com/v1.0/me/drive/items/root:/';
 
 describe('OneDrive experimental backend', function() {
+  it('configures an optional registration without initializing MSAL or needing Web Crypto', async function() {
+    const descriptors = ['window', 'crypto'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { location: { origin: 'http://app:8000' } } });
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {} });
+    try {
+      const f = fixture();
+      f.backend.setClientId('public-registration');
+      expect(f.backend.auth).to.equal(undefined);
+      expect(f.backend.initialized).to.equal(undefined);
+      await expect(f.backend.connect()).to.be.rejectedWith('secure context');
+      expect(f.backend.auth).to.equal(undefined);
+      expect(f.rs.remote).not.to.equal(f.backend);
+      expect(f.calls).to.have.length(0);
+    } finally {
+      for (const [name, descriptor] of descriptors) {
+        if (descriptor) { Object.defineProperty(globalThis, name, descriptor); } else { delete globalThis[name]; }
+      }
+    }
+  });
+
+  it('cancels a disconnected attempt before initialization can open a popup', async function() {
+    const f = fixture(); let initialize, popups = 0;
+    f.backend.initialized = new Promise(resolve => { initialize = resolve; });
+    f.backend.auth.loginPopup = async () => { popups++; return { account: {} }; };
+    const pending = f.backend.connect();
+    f.backend.configure({ userAddress: null, token: null });
+    initialize();
+    await expect(pending).to.be.rejectedWith('cancelled');
+    expect(popups).to.equal(0);
+    expect(f.calls).to.have.length(0);
+  });
+
+  it('drops a pending initialization when the registration is replaced', async function() {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { location: { origin: 'https://app.example.test' } } });
+    try {
+      const f = fixture(); let initialize, popups = 0;
+      f.backend.initialized = new Promise(resolve => { initialize = resolve; });
+      f.backend.auth.loginPopup = async () => { popups++; return { account: {} }; };
+      const pending = f.backend.connect();
+      f.backend.setClientId('replacement-registration');
+      initialize();
+      await expect(pending).to.be.rejectedWith('cancelled');
+      expect(f.backend.clientId).to.equal('replacement-registration');
+      expect(f.backend.auth).to.equal(undefined);
+      expect(popups).to.equal(0);
+      expect(f.calls).to.have.length(0);
+    } finally {
+      if (descriptor) { Object.defineProperty(globalThis, 'window', descriptor); } else { delete globalThis.window; }
+    }
+  });
+
+  it('does not remove a replacement popup callback marker when an old login finishes', async function() {
+    const descriptors = ['window', 'sessionStorage'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    const values = new Map();
+    const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { opener: {}, location: { origin: 'https://app.example.test' } } });
+    Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: storage });
+    try {
+      const f = fixture(); let oldLogin, newLogin;
+      f.backend.auth.loginPopup = () => new Promise(resolve => { oldLogin = resolve; });
+      const old = f.backend.connect();
+      await new Promise(resolve => setImmediate(resolve));
+      f.backend.setClientId('replacement-registration');
+      f.backend.auth = { ...fixture().backend.auth, loginPopup: () => new Promise(resolve => { newLogin = resolve; }) };
+      f.backend.initialized = Promise.resolve();
+      const replacement = f.backend.connect();
+      await new Promise(resolve => setImmediate(resolve));
+      const marker = storage.getItem('remotestorage:onedrive-popup');
+      oldLogin({ account: { username: 'old@example.test' } });
+      await expect(old).to.be.rejectedWith('cancelled');
+      expect(storage.getItem('remotestorage:onedrive-popup')).to.equal(marker);
+      expect(OneDrive.isRedirect('https://app.example.test/?code=native')).to.equal(true);
+      newLogin({ account: { username: 'replacement@example.test' } });
+      await replacement;
+      expect(f.backend.userAddress).to.equal('replacement@example.test');
+      expect(storage.getItem('remotestorage:onedrive-popup')).to.equal(null);
+    } finally {
+      for (const [name, descriptor] of descriptors) {
+        if (descriptor) { Object.defineProperty(globalThis, name, descriptor); } else { delete globalThis[name]; }
+      }
+    }
+  });
+
+  it('clears a failed MSAL initialization and exposes a recoverable connection error', async function() {
+    const f = fixture();
+    f.backend.initialized = Promise.reject(new Error('Initialization failed'));
+    await expect(f.backend.connect()).to.be.rejectedWith('Initialization failed');
+    expect(f.backend.auth).to.equal(undefined);
+    expect(f.backend.initialized).to.equal(undefined);
+    expect(f.calls).to.have.length(0);
+  });
+
+  it('observes MSAL cleanup failures instead of leaving an unhandled rejection', async function() {
+    const f = fixture(); f.rs.onedrive = f.backend;
+    f.backend.auth.clearCache = async () => { throw new Error('Cleanup failed'); };
+    f.backend.configure({ userAddress: null, token: null });
+    expect(f.backend.auth).to.equal(undefined);
+    expect(f.backend.initialized).to.equal(undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.events.some(event => event[0] === 'error' && event[1].message === 'Cleanup failed')).to.equal(true);
+  });
+
   it('connects through MSAL and opens only the consenting account app folder', async function() {
     const f = fixture();
     await f.backend.connect();
