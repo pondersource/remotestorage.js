@@ -6,12 +6,14 @@ import { encodeRecord } from '../../build/onedrive-format.js';
 
 // Replace only the native SDK boundary. These tests do not establish wallet or
 // broker interoperability; the production bundle uses the pinned real SDKs.
+let sdkLoads = 0;
 const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@ng-org/web' || specifier === '@ng-org/orm') return { url: 'mock:' + specifier, shortCircuit: true };
     return next(specifier, context);
   },
   load(url, context, next) {
+    if (url.startsWith('mock:@ng-org/')) { sdkLoads++; }
     if (url === 'mock:@ng-org/web') return { format: 'commonjs', shortCircuit: true, source: `
       exports.init = async cb => cb({status:'loggedin',session:{session_id:'session',private_store_id:'private'}});
       exports.ng = {sparql_query:async()=>globalThis.ngFixture.query(), doc_create:async()=>{globalThis.ngFixture.created++;return globalThis.ngFixture.collection;},sparql_update:async()=>{}};` };
@@ -22,7 +24,8 @@ const hooks = registerHooks({
   }
 });
 const NextGraph = createRequire(import.meta.url)('../../build/nextgraph.js');
-hooks.deregister();
+// Native SDK requires are deferred until connect; keep boundary hooks alive.
+after(() => hooks.deregister());
 function fixture() {
   globalThis.ngFixture?.backend?.configure({ token: null });
   const documents = {}, events = [];
@@ -40,6 +43,11 @@ const envelope = async text => JSON.parse(await encodeRecord(text, 'text/plain')
 function add(f, record) { f.documents['rs_revision_' + record.id] = JSON.stringify(record); }
 
 describe('Nextgraph document ledger (native SDK boundary mocked)', function() {
+  it('does not evaluate native SDK modules when loading or constructing the backend', function() {
+    const f = fixture();
+    expect(f.backend.connected).to.equal(false);
+    expect(sdkLoads).to.equal(0);
+  });
   it('opens the private collection and writes through an awaited native transaction', async function() {
     const f = fixture(); await f.backend.connect();
     const created = await f.backend.put('/notes/a', 'hello', 'text/plain', {ifNoneMatch:'*'});

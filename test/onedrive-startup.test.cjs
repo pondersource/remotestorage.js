@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { chromium } = require('@playwright/test');
 
-test('optional OneDrive configuration stays lazy on insecure HTTP, including reload', async t => {
+test('optional SDKs leave guest storage usable without Web Crypto or modern Set helpers', async t => {
   const browser = await chromium.launch();
   t.after(() => browser.close());
   const page = await browser.newPage();
@@ -14,24 +14,29 @@ test('optional OneDrive configuration stays lazy on insecure HTTP, including rel
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => requests.push(request.url()));
   await page.addInitScript(() => {
+    delete Set.prototype.union;
     window.unhandled = [];
     window.addEventListener('unhandledrejection', event => unhandled.push(String(event.reason)));
   });
   const origin = 'http://app.example.test:8000';
   const bundle = readFileSync(require.resolve('../release/remotestorage-all.js'));
   const html = `<!doctype html><script src="/rs.js"></script>
-    <button id="connect">Connect OneDrive</button><output id="status">Starting</output><script>
+    <button id="connect">Connect OneDrive</button><button id="nextgraph">Connect Nextgraph</button><output id="status">Starting</output><script>
     window.rs = new RemoteStorage({ modules: [{name:'notes',builder(client) {
       client.declareType('note',{type:'object'});
       return {exports:{write:value=>client.storeObject('note','one',value),read:()=>client.getObject('one')}};
     }}] });
     rs.access.claim('notes','rw');rs.caching.enable('/notes/');
-    rs.setApiKeys({onedrive:'580dcb92-f05e-4ec9-ac33-48f005b8bd01'});
+    rs.setApiKeys({onedrive:'580dcb92-f05e-4ec9-ac33-48f005b8bd01',dropbox:'test-public-app-key',googledrive:'test-public-client-id'});
     rs.on('ready',async()=>{
       const previous=await rs.notes.read();window.previous=previous;
       await rs.notes.write({title:'Guest content'});window.record=await rs.notes.read();
       document.querySelector('#status').textContent='Guest ready';window.ready=true;
     });
+    document.querySelector('#nextgraph').onclick=async()=>{
+      try {await rs.nextgraph.connect();}catch(error){window.nextgraphError=error.message;}
+      await rs.notes.write({title:'Still editable after Nextgraph'});window.record=await rs.notes.read();
+    };
     document.querySelector('#connect').onclick=async()=>{
       try {await rs.onedrive.connect();}catch(error){window.connectionError=error.message;}
       await rs.notes.write({title:'Still editable'});window.record=await rs.notes.read();
@@ -45,6 +50,9 @@ test('optional OneDrive configuration stays lazy on insecure HTTP, including rel
   await page.waitForFunction(() => window.ready);
   assert.equal(await page.evaluate(() => isSecureContext), false);
   assert.equal(await page.evaluate(() => !!crypto.subtle), false);
+  assert.equal(await page.evaluate(() => typeof Set.prototype.union), 'undefined');
+  assert.deepEqual(await page.evaluate(() => ['dropbox','googledrive','solid','lws','onedrive','nextgraph'].filter(name => !!rs[name])),
+    ['dropbox','googledrive','solid','lws','onedrive','nextgraph']);
   assert.equal(await page.locator('#status').textContent(), 'Guest ready');
   assert.equal(await page.evaluate(() => record.title), 'Guest content');
   assert.equal(await page.evaluate(() => rs.onedrive.auth), undefined);
@@ -57,6 +65,11 @@ test('optional OneDrive configuration stays lazy on insecure HTTP, including rel
   assert.match(await page.evaluate(() => connectionError), /secure context.*HTTPS or localhost/);
   assert.equal(await page.evaluate(() => rs.onedrive.auth), undefined);
   assert.equal(await page.evaluate(() => rs.backend), 'remotestorage');
+  await page.locator('#nextgraph').click();
+  await page.waitForFunction(() => window.nextgraphError && record.title === 'Still editable after Nextgraph');
+  assert.match(await page.evaluate(() => nextgraphError), /Set.union.*Update your browser/);
+  assert.equal(await page.evaluate(() => rs.backend), 'remotestorage');
+  assert.equal(await page.evaluate(() => typeof Set.prototype.union), 'undefined');
   // A remembered provider also needs an explicit reconnect: tokens are kept
   // only in memory, so restoring its label must not initialize MSAL on HTTP.
   await page.evaluate(() => localStorage.setItem('remotestorage:backend', 'onedrive'));

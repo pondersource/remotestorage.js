@@ -81,3 +81,11 @@ changes. The package in `node_modules` is not modified, licensing is retained,
 and the bundle remains a single file. The real SDK browser protocol test runs
 both the app and simulated wallet under CSP without `unsafe-eval`. Native
 wallet/broker acceptance remains separate.
+
+The web/ORM SDK modules are evaluated only when connecting to Nextgraph (or
+resuming its explicitly requested wallet flow), while their code remains in the
+single bundle. Guest mode, snapshot export, and other providers do not inherit
+the native SDK's newer runtime requirements. In particular, the pinned ORM uses
+`Set.union`; browsers without it receive a Nextgraph connection error with
+upgrade/other-provider guidance. No global Set polyfill is installed. SDK startup
+errors are confined to the connection attempt.

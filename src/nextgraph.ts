@@ -1,20 +1,46 @@
-import { init as initWeb, ng, type Session } from '@ng-org/web';
-import { initNg, DiscreteOrmSubscription } from '@ng-org/orm';
+import type { Session } from '@ng-org/web';
+import type { DiscreteOrmSubscription } from '@ng-org/orm';
 import { RemoteBase, type Remote, type RemoteResponse, type RemoteSettings } from './remote';
 import type RemoteStorage from './remotestorage';
 import { decodeRecord, encodeRecord, unbase64url, type OneDriveRecord } from './onedrive-format';
 import { readLedger, documentHeads, documentRevision, validateDocumentPath, type DocumentRevision } from './document-ledger';
 
 const COLLECTION = 'https://pondersource.com/ns/remotestorage/DocumentLedgerV1';
+interface NativeSDK {
+  web: typeof import('@ng-org/web');
+  orm: typeof import('@ng-org/orm');
+}
+let sdkPromise: Promise<NativeSDK>;
 let sessionPromise: Promise<Session>;
+
+/** Load native SDK values only after a connection request, never at app startup. */
+function nativeSDK(): Promise<NativeSDK> {
+  if (!sdkPromise) {
+    // The pinned ORM evaluates Set.union while loading. Check its requirement
+    // only for Nextgraph; do not polyfill the app's global runtime for an
+    // optional backend or let it prevent guest/other-provider startup.
+    const prototype = Set.prototype as unknown as { union?: unknown };
+    if (typeof prototype.union !== 'function') {
+      return Promise.reject(new Error('Nextgraph requires Set.union support. Update your browser or choose another storage backend.'));
+    }
+    // tsc's CommonJS output defers these requires inside promise callbacks.
+    // Webpack bundles both modules in this file, without extra chunk assets.
+    sdkPromise = Promise.all([import('@ng-org/web'), import('@ng-org/orm')])
+      .then(([web, orm]) => ({ web, orm }))
+      .catch(error => {
+        throw new Error('The Nextgraph SDK could not start in this browser. Update your browser or choose another storage backend.', { cause: error });
+      });
+  }
+  return sdkPromise;
+}
 const failedCollections = new Set<string>();
 const collectionOwners = new Map<string, NextGraph>();
-function nativeSession(): Promise<Session> {
+function nativeSession(sdk: NativeSDK): Promise<Session> {
   if (!sessionPromise) {
     sessionPromise = new Promise<Session>((resolve, reject) => {
-      initWeb(event => {
+      sdk.web.init(event => {
         if (event.status !== 'loggedin' || !event.session?.private_store_id) { reject(new Error('Nextgraph did not return a private store.')); return; }
-        initNg(ng, event.session); resolve(event.session);
+        sdk.orm.initNg(sdk.web.ng, event.session); resolve(event.session);
       }, true, []).catch(reject);
     }).catch(error => { sessionPromise = undefined; throw error; });
   }
@@ -76,9 +102,13 @@ class NextGraph extends RemoteBase implements Remote {
     if (this.requiresReload) { throw new Error('Reload this app to reopen Nextgraph after a local store error.'); }
     if (this.rs.remote.connected) { throw new Error('Disconnect the current storage before connecting Nextgraph.'); }
     const generation = ++this.generation;
-    // Persists the user's explicit request so the wallet-hosted callback can resume it.
+    const sdk = await nativeSDK();
+    if (generation !== this.generation) { throw new Error('Nextgraph connection was cancelled.'); }
+    // Persist only after SDK startup succeeds, so an unsupported optional SDK
+    // leaves the guest/current-provider selection unchanged.
     this.rs.setBackend('nextgraph');
-    const session = await nativeSession();
+    const session = await nativeSession(sdk);
+    const ng = sdk.web.ng;
     if (generation !== this.generation) { throw new Error('Nextgraph connection was cancelled.'); }
     const store = 'did:ng:' + session.private_store_id;
     const discover = async (): Promise<string[]> => {
@@ -112,7 +142,7 @@ class NextGraph extends RemoteBase implements Remote {
     let subscription: DiscreteOrmSubscription<Record<string, unknown>>;
     let documents: Record<string, unknown>;
     try {
-      subscription = DiscreteOrmSubscription.getOrCreate<Record<string, unknown>>(collection);
+      subscription = sdk.orm.DiscreteOrmSubscription.getOrCreate<Record<string, unknown>>(collection);
       documents = await Promise.race([subscription.readyPromise, new Promise<never>((_, reject) => {
         const timer = setTimeout(() => reject(new Error('Nextgraph did not open the collection. Reload this app to retry.')), 30000);
         subscription.readyPromise.finally(() => clearTimeout(timer));
