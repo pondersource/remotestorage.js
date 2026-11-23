@@ -70,3 +70,16 @@ test('a metadata transport failure does not become an anonymous connection', asy
   };
   await assert.rejects(discoverLWS(root, { fetch: request }), /metadata CORS failed/);
 });
+
+test('origin-root metadata removes the root-only slash and preserves the query', async () => {
+  for (const query of ['', '?view=files']) {
+    const resource = 'https://pods.example/' + query;
+    const metadata = 'https://pods.example/.well-known/oauth-protected-resource' + query;
+    const request = async url => {
+      if (url === resource) return json({ ...description, id: resource, service: [{ type: 'StorageRoot', serviceEndpoint: resource }] });
+      assert.equal(url, metadata);
+      return json({ resource, authorization_servers: [issuer] });
+    };
+    assert.deepEqual((await discoverLWS(resource, { fetch: request })).authorizationServers, [issuer]);
+  }
+});

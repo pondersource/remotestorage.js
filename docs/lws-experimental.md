@@ -168,6 +168,10 @@ npm run test:lws:interop
 This open-mode target exercises storage and browser/CORS interoperability. It
 does not establish real-provider OpenID interoperability; the signed-token and
 PKCE tests cover that flow separately with controlled identity responses.
+For the Java target, the runner explicitly disables the otherwise enabled
+embedded authorization server and any trusted issuers, and checks that protected
+resource metadata returns 404. Anonymous test access is an intentional server
+configuration on disposable loopback, rather than a client authentication bypass.
 
 ## Public roots and projected member types
 
@@ -179,6 +183,8 @@ resource and advertise valid authorization servers. Only a missing metadata
 endpoint (404 or 410) permits open-mode fallback; denied, malformed or failed
 metadata requests do not silently downgrade authentication. This lookup also
 keeps the storage/issuer binding reproducible after the OpenID redirect.
+For an origin-root resource, the metadata URL omits the root-only slash, as
+RFC 9728 section 3.1 requires; a query is preserved.
 
 Some container listings project a custom member media type as
 `application/octet-stream`. Index discovery uses at most four concurrent HEAD
