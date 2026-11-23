@@ -1,0 +1,21 @@
+{
+  "sourceCommit": "8ac2676245768e4e72c1df5c1b524e559bcd3b5c",
+  "sourceRepository": "https://git.nextgraph.org/NextGraph/nextgraph-rs",
+  "bridgeFiles": {
+    "main.ts": "f8f99730d66d99b06a14c5203ac66655cf144537a6aa65e122fb3ca205941c54",
+    "wasm-worker.js": "a929ae0ce6075def52eb61b5c367424e7231ed4571b7529b45402c3d9bea0ecb",
+    "worker.js": "5ed25f5cb8f30c7ce32d76d429780ae7ea56913578a933be25182d7f08fdfada",
+    "package.json": "37921f21188e1ea93aa5a826aca3b7101dd0ae389568930cab699d66383cf5a5"
+  },
+  "wasm": {
+    "package": "@ng-org/lib-wasm",
+    "version": "0.1.2-alpha.9",
+    "url": "https://registry.npmjs.org/@ng-org/lib-wasm/-/lib-wasm-0.1.2-alpha.9.tgz",
+    "archiveSha256": "6eed862907cd9f198fbe94ad123fe987d570339d497fc67b539809597b0b7e77",
+    "runtimeSha256": "d76013b1def3e6ddd68531b596ab55b971fa85e3a9efa794e1e59908848286ad"
+  },
+  "ormVersion": "0.1.2-alpha.25",
+  "productionWebVersion": "0.1.2-alpha.17",
+  "productionWebSDKUsed": false,
+  "notes": "The published WASM has no gitHead. The listed source commit matches package versions; source-to-binary reproducibility is not asserted. The byte-exact API bridge is compiled only for this disposable fixture. No wallet consent or broker delivery is simulated or claimed."
+}
