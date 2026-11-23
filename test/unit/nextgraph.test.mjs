@@ -193,4 +193,17 @@ describe('Nextgraph document ledger (native SDK boundary mocked)', function() {
     expect(await f.backend.exportRecovery()).to.deep.equal(before);
     expect(f.created).to.equal(0);
   });
+
+  it('shows newly received native conflict heads and archives them before recovery export', async function() {
+    const f=fixture();await f.backend.connect();
+    const first=await f.backend.put('/notes/a','original','text/plain');
+    const incoming=documentRevision('/notes/a',[],await envelope('incoming'));
+    f.documents['rs_revision_'+incoming.id]=JSON.stringify(incoming);
+    expect(f.backend.listConflicts()).to.have.length(1);
+    expect(f.backend.getConflicts('/notes/a').map(record=>record.id)).to.have.members([first.revision,incoming.id]);
+    const archive=await f.backend.exportRecovery();
+    expect(archive.records.map(record=>record.id)).to.have.members([first.revision,incoming.id]);
+    delete f.documents['rs_revision_'+incoming.id];
+    expect((await f.backend.exportRecovery()).records).to.have.deep.members(archive.records);
+  });
 });

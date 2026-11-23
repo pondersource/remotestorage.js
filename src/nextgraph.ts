@@ -439,11 +439,15 @@ class NextGraph extends RemoteBase implements Remote {
   }
 
   /** Both candidates remain durable until an explicit application decision. */
-  getConflicts(path: string): DocumentRevision[] { return documentHeads(this.records(path), path); }
+  getConflicts(path: string): DocumentRevision[] {
+    return documentHeads(mergeJournalRecords(this.records(path), this.nativeRecords()), path);
+  }
 
   listConflicts(): { path: string; revisions: DocumentRevision[] }[] {
     if (!this.connected || !this.journal) { throw new Error('Nextgraph is not connected.'); }
-    const records = this.archived;
+    // The synchronous UI must see newly received native heads before its next
+    // async read. Persistence and conflict decisions still await the journal.
+    const records = mergeJournalRecords(this.archived, this.nativeRecords());
     return [...new Set(records.map(record => record.path))]
       .filter(path => this.rs.access.checkPathPermission(path, 'r'))
       .map(path => ({path, revisions: documentHeads(records, path)}))
@@ -452,7 +456,8 @@ class NextGraph extends RemoteBase implements Remote {
 
   async resolveConflict(path: string, chosenRevision: string, expectedHeads?: string[]): Promise<void> {
     const generation = this.generation;
-    const reviewed = expectedHeads || documentHeads(this.records(path, 'rw'), path).map(record => record.id);
+    this.records(path, 'rw');
+    const reviewed = expectedHeads || this.getConflicts(path).map(record => record.id);
     return this.exclusive(async () => {
       this.records(path, 'rw');
       const result = await this.journal.transact(this.nativeRecords(), records => {
@@ -475,7 +480,7 @@ class NextGraph extends RemoteBase implements Remote {
   async exportRecovery(): Promise<RecoverySnapshot> {
     if (!this.journal || !this.session) { throw new Error('Select a Nextgraph account and collection before exporting recovery data.'); }
     const journal = this.journal, generation = this.generation;
-    const archive = await journal.transact([], () => ({ value: undefined }), false);
+    const archive = await journal.transact(this.nativeRecords(), () => ({ value: undefined }), false);
     if (generation !== this.generation || journal !== this.journal) { throw new Error('Nextgraph request was cancelled.'); }
     return { format: 'pondersource-nextgraph-revisions', version: 1, store: journal.store,
       collection: journal.collection, records: archive.records.filter(record => this.rs.access.checkPathPermission(record.path, 'r')) };
