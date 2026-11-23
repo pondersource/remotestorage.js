@@ -34,6 +34,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@inrupt/solid-client": "^4.0.0",
+    "@inrupt/solid-client-authn-browser": "^5.0.2",
     "@playwright/test": "1.65.1",
     "@types/node": "^26.2.0",
     "@types/tv4": "^1.2.33",
@@ -60,8 +62,6 @@
   },
   "dependencies": {
     "@azure/msal-browser": "4.29.0",
-    "@inrupt/solid-client": "^4.0.0",
-    "@inrupt/solid-client-authn-browser": "^5.0.2",
     "@ng-org/orm": "0.1.2-alpha.25",
     "@ng-org/shex-orm": "0.1.2-alpha.12",
     "@ng-org/web": "0.1.2-alpha.17",
@@ -85,6 +85,18 @@
   "overrides": {
     "mocha": {
       "diff": "^8.0.3"
+    }
+  },
+  "peerDependencies": {
+    "@inrupt/solid-client": "^4.0.0",
+    "@inrupt/solid-client-authn-browser": "^5.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@inrupt/solid-client": {
+      "optional": true
+    },
+    "@inrupt/solid-client-authn-browser": {
+      "optional": true
     }
   }
 }
