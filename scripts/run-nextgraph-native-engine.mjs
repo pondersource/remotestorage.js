@@ -14,13 +14,14 @@ const fixture = join(root, 'test/fixtures/nextgraph-native-engine');
 const require = createRequire(import.meta.url);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
-export async function prepareNativeEngine() {
+export async function prepareNativeEngine({ adapter = false } = {}) {
   const pins = JSON.parse(await readFile(join(fixture, 'provenance.json'), 'utf8'));
   for (const [name, hash] of Object.entries(pins.bridgeFiles)) {
     if (sha256(await readFile(join(fixture, 'api-web', name))) !== hash) {
       throw new Error(`Upstream API bridge hash mismatch: ${name}`);
     }
   }
+  if (sha256(await readFile(join(fixture, 'web.ts'))) !== pins.localWebSourceSha256) { throw new Error('Pinned local web SDK source mismatch'); }
   const ormPackage = JSON.parse(readFileSync(join(dirname(require.resolve('@ng-org/orm')), '../package.json'), 'utf8'));
   if (ormPackage.version !== pins.ormVersion) { throw new Error('Pinned ORM version mismatch'); }
   const output = await mkdtemp(join(tmpdir(), 'rs-nextgraph-native-'));
@@ -48,6 +49,7 @@ export async function prepareNativeEngine() {
   const exports = WebAssembly.Module.exports(wasmModule).map(item => item.name);
   const plugins = [{ name: 'pinned-native-engine', setup(bundler) {
     bundler.onResolve({ filter: /^@ng-org\/lib-wasm$/ }, () => ({ path: join(engine, 'lib_wasm.js') }));
+    bundler.onResolve({ filter: /^@ng-org\/web$/ }, () => ({ path: join(fixture, 'web.ts') }));
     bundler.onResolve({ filter: /jsland\/bowser\.js$/ }, () => ({ path: join(engine, 'snippets/lib-wasm-ec10d2ecdd85f644/jsland/bowser.js') }));
     bundler.onResolve({ filter: /\?worker&inline$/ }, args => ({ path: args.path.includes('wasm-worker') ? 'engine-worker.js' : 'wallet-worker.js', namespace: 'fixture-worker' }));
     bundler.onLoad({ filter: /.*/, namespace: 'fixture-worker' }, args => ({ contents: `export default class extends Worker {constructor(){super('/${args.path}',{type:'module'})}}`, loader: 'js' }));
@@ -57,15 +59,21 @@ export async function prepareNativeEngine() {
     }));
   } }];
   const options = { bundle: true, format: 'esm', target: 'es2022', platform: 'browser', plugins,
+    define: { 'import.meta.env.NG_DEV_LOCAL_BROKER': 'true', 'import.meta.env.NG_DEV3': 'false', 'import.meta.env.NG_DEV': 'false', 'import.meta.env.NG_REDIR_SERVER': 'undefined' },
     nodePaths: [join(root, 'node_modules')], logLevel: 'silent' };
   await build({ ...options, entryPoints: [join(fixture, 'api-web/wasm-worker.js')], outfile: join(output, 'engine-worker.js') });
   await build({ ...options, entryPoints: [join(fixture, 'api-web/worker.js')], outfile: join(output, 'wallet-worker.js') });
   await build({ ...options, entryPoints: [join(fixture, 'app.js')], outfile: join(output, 'app.js') });
+  if (adapter) {
+    await build({ ...options, entryPoints: [join(fixture, 'adapter.js')], outfile: join(output, 'adapter.js') });
+    await writeFile(join(output, 'adapter.html'), '<!doctype html><meta charset="utf-8"><title>Actual adapter acceptance</title><script type="module" src="/adapter.js"></script>');
+  }
   await copyFile(join(engine, 'lib_wasm_bg.wasm'), join(output, 'lib_wasm_bg.wasm'));
   await writeFile(join(output, 'index.html'), '<!doctype html><meta charset="utf-8"><title>Disposable NextGraph engine acceptance</title><script type="module" src="/app.js"></script>');
   const server = createServer(async (request, response) => {
-    const path = request.url === '/' ? 'index.html' : request.url.slice(1);
-    if (!['index.html', 'app.js', 'engine-worker.js', 'wallet-worker.js', 'lib_wasm_bg.wasm'].includes(path)) { response.writeHead(404).end(); return; }
+    const pathname = new URL(request.url, 'http://localhost').pathname;
+    const path = pathname === '/' ? 'index.html' : pathname.slice(1);
+    if (!['index.html', 'app.js', 'adapter.html', 'adapter.js', 'engine-worker.js', 'wallet-worker.js', 'lib_wasm_bg.wasm'].includes(path)) { response.writeHead(404).end(); return; }
     response.setHeader('Content-Type', path.endsWith('.wasm') ? 'application/wasm' : path.endsWith('.js') ? 'text/javascript' : 'text/html');
     response.setHeader('Cache-Control', 'no-store');
     response.end(await readFile(join(output, path)));
@@ -73,6 +81,6 @@ export async function prepareNativeEngine() {
   // A genuine rejected transport on this fixture's own ephemeral port. Never
   // probe another local service or emulate a NextGraph broker handshake.
   server.on('upgrade', (_request, socket) => socket.destroy());
-  await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
+  await new Promise((resolveListen, rejectListen) => { server.once('error', rejectListen); server.listen(adapter ? 1421 : 0, '127.0.0.1', resolveListen); });
   return { output, pins, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(resolveClose => server.close(resolveClose)) };
 }

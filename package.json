@@ -44,6 +44,7 @@
     "chai": "^6.2.2",
     "chai-as-promised": "^8.0.2",
     "eslint": "^10.8.1",
+    "fake-indexeddb": "6.2.4",
     "fetch-mock": "^11.1.5",
     "globals": "^17.9.0",
     "jaribu": "^2.2.3",

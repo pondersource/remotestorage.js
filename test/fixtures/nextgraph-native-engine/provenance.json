@@ -17,5 +17,6 @@
   "ormVersion": "0.1.2-alpha.25",
   "productionWebVersion": "0.1.2-alpha.17",
   "productionWebSDKUsed": false,
+  "localWebSourceSha256": "e8d0122ce4d097a36d3a48c6b72ea87614b0f4cc990c0e53f319e04f0564ccb9",
   "notes": "The published WASM has no gitHead. The listed source commit matches package versions; source-to-binary reproducibility is not asserted. The byte-exact API bridge is compiled only for this disposable fixture. No wallet consent or broker delivery is simulated or claimed."
 }

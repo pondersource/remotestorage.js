@@ -9,6 +9,11 @@ let session;
 let subscription;
 let document;
 let failedOutboxWrites = 0;
+let relayInstalled = false;
+let savedSelection;
+let queryGate;
+let releaseQuery;
+const rpcCounts = {};
 const originalSetItem = Storage.prototype.setItem;
 
 function remember() {
@@ -141,6 +146,48 @@ window.native = {
   async connectUnavailableBroker() {
     const info = await ng.client_info();
     return ng.user_connect(info, session.user, location.href);
+  },
+  async prepareAdapterCollection() {
+    state.documentId = await ng.doc_create(session.session_id, 'Automerge', 'data:json', 'store', undefined);
+    await ng.sparql_update(session.session_id,
+      `INSERT DATA { GRAPH <${state.documentId}> { <${state.documentId}> a <https://pondersource.com/ns/remotestorage/DocumentLedgerV1> } }`, state.documentId);
+    remember();
+  },
+  saveSelection() { savedSelection = { state: { ...state }, session }; },
+  restoreSelection() { state = savedSelection.state; session = savedSelection.session; remember(); },
+  rpcCounts: () => ({ ...rpcCounts }),
+  pauseDiscovery() { window.nativeQueryPaused = false; queryGate = new Promise(resolve => { releaseQuery = resolve; }); },
+  releaseDiscovery() { releaseQuery(); queryGate = undefined; },
+  attachAdapter(mode) {
+    // Transparent test relay to the actual native API, following broker-auth's
+    // MessageChannel protocol. It provides no consent UI or broker simulation.
+    const appOrigin = `http://127.0.0.1:${location.port}`;
+    if (!relayInstalled) {
+      relayInstalled = true;
+      window.addEventListener('message', async event => {
+        if (event.origin !== appOrigin || event.source !== window.document.querySelector('iframe')?.contentWindow) { return; }
+        const { method, args = [], streamed, port } = event.data;
+        if (method === 'init') { port.postMessage({ ok: true, ret: session }); port.close(); return; }
+        const allowed = ['sparql_query', 'sparql_update', 'doc_create', 'orm_start_discrete', 'discrete_orm_update', 'user_connect', 'client_info'];
+        if (!allowed.includes(method)) { port.postMessage({ ok: false, ret: 'Method not allowed by disposable fixture' }); port.close(); return; }
+        rpcCounts[method] = (rpcCounts[method] || 0) + 1;
+        try {
+          if (method === 'sparql_query' && queryGate) { window.nativeQueryPaused = true; await queryGate; }
+          if (streamed) {
+            args.push(value => port.postMessage({ stream: true, ret: value }));
+            let cancel = () => {};
+            port.onmessage = message => { if (message.data.close) { cancel(); port.close(); } };
+            cancel = await ng[method](...args);
+            port.postMessage({ stream: true });
+          } else {
+            port.postMessage({ ok: true, ret: await ng[method](...args) }); port.close();
+          }
+        } catch (error) { port.postMessage({ ok: false, ret: String(error) }); port.close(); }
+      });
+    }
+    window.document.querySelector('iframe')?.remove();
+    const frame = window.document.createElement('iframe');
+    frame.src = appOrigin + '/adapter.html' + (mode === 'upgrade' ? '?upgrade=1' : ''); window.document.body.append(frame);
   },
 };
 window.fixtureReady = true;

@@ -77,3 +77,21 @@ jobs:
       - run: node --test test/nextgraph-build.test.cjs test/nextgraph-browser.test.cjs test/onedrive-startup.test.cjs
       - name: Persistent cache durability and cross-tab transactions
         run: node --test test/cache-durability-browser.test.cjs
+
+  nextgraph-native-engine:
+    name: Nextgraph actual engine recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Characterize pinned native engine boundaries
+        run: node --test test/nextgraph-native-engine.test.cjs
+      - name: Require durable adapter recovery with the actual engine
+        run: node --test test/nextgraph-native-adapter.test.cjs

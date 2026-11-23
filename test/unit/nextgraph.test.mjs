@@ -1,4 +1,5 @@
 import { expect } from 'chai';
+import { IDBFactory } from 'fake-indexeddb';
 import { createRequire, registerHooks } from 'node:module';
 import { Access } from '../../build/access.js';
 import { documentRevision, documentHeads, readLedger } from '../../build/document-ledger.js';
@@ -8,6 +9,7 @@ import { jsonReadbackContract } from '../helpers/json-readback-contract.mjs';
 // Replace only the native SDK boundary. These tests do not establish wallet or
 // broker interoperability; the production bundle uses the pinned real SDKs.
 let sdkLoads = 0;
+const originalIndexedDB = globalThis.indexedDB;
 const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@ng-org/web' || specifier === '@ng-org/orm') return { url: 'mock:' + specifier, shortCircuit: true };
@@ -26,8 +28,9 @@ const hooks = registerHooks({
 });
 const NextGraph = createRequire(import.meta.url)('../../build/nextgraph.js');
 // Native SDK requires are deferred until connect; keep boundary hooks alive.
-after(() => hooks.deregister());
+after(() => { hooks.deregister(); globalThis.indexedDB = originalIndexedDB; });
 function fixture() {
+  globalThis.indexedDB = new IDBFactory();
   globalThis.ngFixture?.backend?.configure({ token: null });
   const documents = {}, events = [];
   const f = { collection: 'did:ng:collection-' + crypto.randomUUID(), documents, commits: 0, closed: 0, created: 0,
@@ -113,27 +116,32 @@ describe('Nextgraph document ledger (native SDK boundary mocked)', function() {
     expect(calls.every(path=>path.startsWith('/notes/')||path.startsWith('/public/notes/'))).to.equal(true);
     expect(f.commits).to.equal(0);
   });
-  it('invalidates a failed SDK view and cancels a delayed payload on disconnect', async function() {
+  it('keeps durable recovery available after a failed SDK view and cancels a delayed payload on disconnect', async function() {
     const f=fixture();await f.backend.connect();f.failCommit=true;
-    let error;try{await f.backend.put('/notes/a','hello','text/plain');}catch(e){error=e;}
-    expect(error.message).to.equal('Local storage failed');expect(f.backend.connected).to.equal(false);expect(f.closed).to.equal(1);
+    const saved=await f.backend.put('/notes/a','hello','text/plain');
+    expect(saved.statusCode).to.equal(201);expect(f.backend.connected).to.equal(true);expect(f.closed).to.equal(1);
+    expect((await f.backend.get('/notes/a')).body).to.equal('hello');
+    expect((await f.backend.exportRecovery()).records).to.have.length(1);
+    expect(f.backend.deliveryState).to.equal('needs-attention');
     expect(f.backend.requiresReload).to.equal(true);
-    try{await f.backend.connect();}catch(e){error=e;}
-    expect(error.message).to.include('Reload');
+    f.backend.configure({token:null});
     const reopened=new NextGraph({...f.rs,remote:{connected:false}});
-    try{await reopened.connect();}catch(e){error=e;}
-    expect(error.message).to.include('Reload');expect(reopened.requiresReload).to.equal(true);
+    await reopened.connect();
+    expect((await reopened.get('/notes/a')).body).to.equal('hello');
+    expect(reopened.deliveryState).to.equal('needs-attention');
+    reopened.configure({token:null});
     const g=fixture();await g.backend.connect();let release;
     const body=new Blob(['old']);body.arrayBuffer=()=>new Promise(resolve=>{release=resolve;});
     const pending=g.backend.put('/notes/a',body,'text/plain');
     g.backend.configure({userAddress:null,token:null});release(new Uint8Array([1]).buffer);
-    try{await pending;}catch(e){error=e;}
+    let error;try{await pending;}catch(e){error=e;}
     expect(error.message).to.include('cancelled');expect(g.commits).to.equal(0);
   });
   it('rejects overlapping connects and prevents two adapters sharing a mutable SDK transaction', async function() {
-    const f=fixture();let release;
-    f.query=()=>new Promise(resolve=>{release=resolve;});
-    const first=f.backend.connect();await new Promise(resolve=>setImmediate(resolve));
+    const f=fixture();let release, queried;
+    const started=new Promise(resolve=>{queried=resolve;});
+    f.query=()=>new Promise(resolve=>{release=resolve;queried();});
+    const first=f.backend.connect();await started;
     let error;try{await f.backend.connect();}catch(e){error=e;}
     expect(error.message).to.include('already in progress');
     release({results:{bindings:[{id:{value:f.collection}}]}});await first;
@@ -152,5 +160,37 @@ describe('Nextgraph document ledger (native SDK boundary mocked)', function() {
     expect(error.message).to.include('Multiple');expect(f.backend.connected).to.equal(false);
     const a=documentRevision('/notes/a',[],await envelope('a'));a.parents=[a.id];
     expect(()=>readLedger({['rs_revision_'+a.id]:JSON.stringify(a)})).to.throw('unrelated');
+  });
+
+  it('reopens an offline archive and replays exactly the original IDs when the native view returns', async function() {
+    const f=fixture();await f.backend.connect();
+    const first=await f.backend.put('/notes/a','durable original','text/plain');
+    const archived=await f.backend.exportRecovery();
+    f.backend.configure({token:null});
+    f.query=()=>{throw Error('Native graph unavailable');};
+    const reopened=new NextGraph({...f.rs,remote:{connected:false}});
+    await reopened.connect();
+    expect((await reopened.get('/notes/a')).body).to.equal('durable original');
+    expect(reopened.deliveryState).to.equal('needs-attention');
+    f.documents={};f.subscription.readyPromise=Promise.resolve(f.documents);
+    f.query=()=>({results:{bindings:[{id:{value:f.collection}}]}});
+    expect(await reopened.resumeNative()).to.equal(true);
+    expect(readLedger(f.documents)).to.deep.equal(archived.records);
+    expect((await reopened.get('/notes/a')).revision).to.equal(first.revision);
+    expect(f.created).to.equal(0);
+    reopened.configure({token:null});
+  });
+
+  it('rejects newly visible collection ambiguity and preserves the prior valid archive', async function() {
+    const f=fixture();await f.backend.connect();
+    await f.backend.put('/notes/a','retained','text/plain');
+    const before=await f.backend.exportRecovery();
+    f.backend.configure({token:null});
+    f.query=()=>({results:{bindings:[{id:{value:'did:ng:other-native-collection'}}]}});
+    const reopened=new NextGraph({...f.rs,remote:{connected:false}});
+    let error;try{await reopened.connect();}catch(value){error=value;}
+    expect(error.message).to.include('Multiple');
+    expect(await f.backend.exportRecovery()).to.deep.equal(before);
+    expect(f.created).to.equal(0);
   });
 });

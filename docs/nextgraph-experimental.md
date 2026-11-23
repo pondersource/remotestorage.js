@@ -22,15 +22,30 @@ edit/delete heads, return 409; both candidates remain durable. The widget lets
 the user download each version and choose one; resolution creates another
 revision referencing all reviewed heads. Tombstones and history are retained.
 
-The engine owns persistence and encrypted replication. An awaited ORM
-transaction means the SDK accepted the local write. It is **not** proof of
-broker delivery. The widget says **Saved on this device** or **Needs attention**.
-No verified broker acknowledgement API is wired up yet. SDK write failures
-invalidate the current view and require a full app reload. The pinned ORM pools
-subscriptions briefly; reusing its failed signal object would otherwise make an
-unaccepted edit look saved. A failed collection cannot be reopened by another
-rs.js instance in that page. Only one adapter may own its mutable SDK
-transaction at a time. Reloading reopens the authoritative engine state.
+An append-only IndexedDB journal owns durable local recovery. A successful write
+waits for its actual transaction completion; quota errors and transaction aborts
+reject before acknowledgement. The journal is keyed by the native private store
+and collection, retains every revision and tombstone, and rejects mismatched
+content for an immutable revision ID. Preconditions and appending a revision run
+in the same short transaction, including across tabs. First collection selection
+uses a separate Web Lock. Cross-device creation is not atomic; concurrent remote
+heads still need explicit resolution.
+
+The native SDK owns encrypted replication. Neither journal completion nor an
+awaited ORM transaction proves broker delivery. The widget says **Saved on this
+device** or **Needs attention**. Actual engine tests show that the pinned SDK can
+resolve a commit after failing to save its encrypted outbox, and session-scoped
+outbox entries can disappear when a tab closes. A wallet export does not include
+the missing documents. The journal preserves local recovery independently of
+those failures; it is not a replacement broker queue.
+
+An unavailable native graph never means that archived documents were deleted.
+A known collection can reopen from its journal. When the graph returns, only
+missing revisions are replayed through the SDK with their original IDs. No SDK
+outbox or peer sequence metadata is changed. An explicitly failed native view
+requires a reload because the ORM pools its failed signal objects. Local journal
+readback and recovery export remain available. Only one adapter may own a mutable
+native transaction in the page.
 
 ## First guest transfer
 
@@ -60,15 +75,30 @@ prevents a UI from resolving a changed set of heads without another review.
 Client-side scope checks constrain this adapter. The collection is private to
 the user's store, not a separate wallet capability per remoteStorage scope.
 
+`exportRecovery()` exports all accessible archived versions and tombstones;
+`importRecovery(snapshot)` requires the same selected account and collection and
+does not replace existing history. Before connecting, `exportCacheRecovery()`
+preserves every accessible older cache candidate (common, local, push, remote,
+and interrupted-write base/observed versions). Existing cache data with no proven
+native collection blocks silent assignment or empty collection creation. It is
+kept intact for explicit recovery; no account is guessed from cache contents.
+
 ## Validation status
 
-Unit tests exercise the adapter at a mocked native SDK boundary, including
-conflicts, deletion, exact imported bytes, permission fences, local transaction
-failures and disconnect races. They do not establish wallet/broker operation.
-Live acceptance still requires wallet consent, two-device offline edits,
-restart before reconnect, a fresh device, duplicate first connections, revoked
-access, interrupted import and loss/recovery of browser storage. Public links,
-large native blobs, history compaction and semantic graph mapping remain open.
+Unit tests cover the journal and adapter separately. A pinned actual WASM/ORM
+fixture also exercises native storage failure, journal aborts, exact revision
+history through reload/tab close/cold browser restart, old-cache recovery,
+account mismatch, and concurrent local-tab selection and preconditions. It uses
+the SDK's supported local web build and a transparent relay, not the native
+wallet consent UI. The engine characterization and deliberately failing strict
+engine durability gate remain separate from the passing journal adapter gate;
+see `test/fixtures/nextgraph-native-engine/README.md` for commands and provenance.
+
+Live acceptance still requires native wallet consent, successful real broker
+replication and acknowledgement, two-device offline edits and a fresh device.
+Public links, large native blobs, history compaction and semantic graph mapping
+remain open. Browser storage clearing can erase the local journal: keep explicit
+exports until remote recovery is verified.
 
 ## Content Security Policy
 

@@ -25,3 +25,23 @@ NEXTGRAPH_REQUIRE_DURABLE=1 NEXTGRAPH_NATIVE_REPORT=/tmp/nextgraph-native-durabi
 That gate requires successful native ORM commits to survive all tested lifecycle boundaries and requires storage failure to reject. Do not use the passing characterization run as evidence that this contract passed. A consumer adapter needs its own durable recovery journal or a verified engine fix before acknowledging documents as durably saved.
 
 No broker runs. A rejected connection can prove that pre-handshake failure preserves pending events; it cannot prove broker acknowledgement, successful replication, interrupted post-handshake outbox delivery or remote recovery. Those require a real `ngd` and an independent client. Retain all application recovery candidates until those contracts are verified.
+
+## Adapter recovery acceptance
+
+```
+NEXTGRAPH_ADAPTER_REPORT=/tmp/nextgraph-native-adapter-report.json node --test test/nextgraph-native-adapter.test.cjs
+```
+
+This separate positive gate runs the actual remoteStorage adapter against the
+same WASM/ORM engine. The native web SDK source is pinned in `web.ts` and built
+with its supported `NG_DEV_LOCAL_BROKER` flag. A transparent relay forwards
+requests to the actual engine; it does not implement storage or consent. No
+native wallet UI or successful broker delivery is claimed.
+
+The gate requires exact immutable revision history and tombstones to survive
+reload, tab close and cold browser restart independently of the SDK outbox. It
+also requires rejected journal persistence, rollback on partial transaction
+failure, account fencing, preservation of old remoteStorage cache candidates,
+and concurrent tabs selecting one collection and enforcing local preconditions.
+Do not confuse its passing result with the intentionally red engine-only
+durability contract above.
