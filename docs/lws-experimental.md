@@ -220,6 +220,17 @@ transport contract; `BaseClient.getObject` performs the JSON parsing. Parsing
 inside the backend would turn unchanged text into an object, falsely report a
 conflict, and discard the pending edit through normal conflict handling.
 
+HTTP containers can legally normalize the spelling of Content-Type. Sync
+compares media type and parameter names without case, and charset values
+without case, honoring optional whitespace, quoted values and parameter order.
+Unknown values, profiles and multipart boundaries remain significant and
+case-sensitive. For `application/json` only, an explicit UTF-8 charset is also
+equivalent to its omission: RFC 8259 defines no charset parameter and requires
+UTF-8 for interoperable exchange. Other encodings/types receive no such default.
+Malformed or duplicate parameters cannot be
+treated as equivalent by this normalization. The acknowledged bytes and all
+existing revision guards still have to match before adopting a validator.
+
 The browser regression covers JSON creation, a subsequent edit, and retrieval
 in a fresh browser after suppressing write-response ETags. The separate lost
 acknowledgement case still retains genuinely different conflict candidates.

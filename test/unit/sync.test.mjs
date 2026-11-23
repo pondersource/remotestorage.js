@@ -492,6 +492,57 @@ describe("Sync", function() {
   });
 
   describe("writes after an acknowledgement without ETag", function() {
+    for (const remoteType of ["application/json;charset=utf-8", "application/json"]) it("retains a JSON edit after HTTP MIME normalization to " + remoteType, async function() {
+      const path = "/foo/normalized.json", body = '{"title":"first"}';
+      this.rs.caching.enable("/foo/");
+      await this.rs.local.setNodes({ [path]: { path,
+        common: { body, contentType: "application/json; charset=UTF-8" },
+        local: { body: '{"title":"pending"}', contentType: "application/json; charset=UTF-8" }
+      } });
+      const put = sinon.stub(this.rs.remote, "put").resolves({ statusCode: 204 });
+      await this.rs.sync.handleGetResponse(path, { changed: true, notFound: false }, body, remoteType, "verified");
+      const node = (await this.rs.local.getNodes([path]))[path];
+      expect(node.local.body).to.equal('{"title":"pending"}');
+      expect(node.common.revision).to.equal("verified");
+      const task = await this.rs.sync.doTask(path);
+      expect(task.action).to.equal("put");
+      expect(put.firstCall.args[3]).to.deep.equal({ ifMatch: "verified" });
+    });
+
+    for (const [label, commonType, remoteType] of [
+      ["profile", 'application/json; profile="https://example.test/original"', 'application/json; profile="https://example.test/other"'],
+      ["encoding", "application/json; charset=UTF-8", "application/json; charset=UTF-16"]
+    ]) it("keeps a changed MIME " + label + " as a conflict even when JSON bytes match", function(done) {
+      const body = '{"title":"first"}';
+      this.rs.local.emitChange = change => {
+        expect(change.origin).to.equal("conflict");
+        expect(change.oldValue).to.equal("pending");
+        expect(change.newValue).to.equal(body);
+        expect(change.newContentType).to.equal(remoteType);
+        done();
+      };
+      this.rs.sync.autoMerge({ path: "/foo/changed.json",
+        common: { body, contentType: commonType },
+        local: { body: "pending", contentType: commonType },
+        remote: { body, contentType: remoteType, revision: "other" }
+      });
+    });
+
+    for (const body of ["", '{"title":"another writer"}']) it("retains changed JSON bytes as a conflict after MIME normalization: " + JSON.stringify(body), function(done) {
+      this.rs.local.emitChange = change => {
+        expect(change.origin).to.equal("conflict");
+        expect(change.oldValue).to.equal("pending");
+        expect(change.newValue).to.equal(body);
+        expect(change.lastCommonValue).to.equal('{"title":"first"}');
+        done();
+      };
+      this.rs.sync.autoMerge({ path: "/foo/changed.json",
+        common: { body: '{"title":"first"}', contentType: "application/json; charset=UTF-8" },
+        local: { body: "pending", contentType: "application/json; charset=UTF-8" },
+        remote: { body, contentType: "application/json", revision: "other" }
+      });
+    });
+
     it("revalidates the acknowledged body before another PUT and adopts the verified revision", async function() {
       const path = "/foo/native.ttl";
       this.rs.caching.enable("/foo/");
