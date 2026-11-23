@@ -57,12 +57,22 @@ define(['./build/indexeddb', './build/config'], function (IndexedDB, config) {
         };
       };
       env.idb = new IndexedDB({
-        transaction: function() {
+        transaction: function(stores, mode) {
+          var aborted = false;
           var ret = {
             objectStore: objectStore,
-            oncomplete: function() {}
+            oncomplete: function() {},
+            onabort: function() {},
+            abort: function() {
+              aborted = true;
+              setTimeout(function() { ret.onabort(); }, 0);
+            }
           };
           env._transactions.push(ret);
+          // A write promise resolves on commit, not when put() was queued.
+          if (mode === 'readwrite') {
+            setTimeout(function() { if (!aborted) ret.oncomplete(); }, 0);
+          }
           return ret;
         }
       });

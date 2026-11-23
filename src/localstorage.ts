@@ -21,6 +21,8 @@ function isNodeKey(key: string): boolean {
 }
 
 class LocalStorage extends CachingLayer {
+  readonly sharedCacheId = 'localstorage:' + NODES_PREFIX;
+
   constructor() {
     super();
     this.addEvents(['change', 'local-events-done']);
