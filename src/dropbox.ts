@@ -60,6 +60,7 @@ const CONTINUE_URL = 'https://api.dropboxapi.com/2/files/list_folder/continue';
 const DOWNLOAD_URL = 'https://content.dropboxapi.com/2/files/download';
 const UPLOAD_URL = 'https://content.dropboxapi.com/2/files/upload';
 const DELETE_URL = 'https://api.dropboxapi.com/2/files/delete';
+const CONDITIONAL_DELETE_URL = 'https://api.dropboxapi.com/2/files/delete_v2';
 const METADATA_URL = 'https://api.dropboxapi.com/2/files/get_metadata';
 const CREATE_SHARED_URL = 'https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings';
 const LIST_SHARED_URL = 'https://api.dropboxapi.com/2/sharing/list_shared_links';
@@ -120,8 +121,17 @@ function httpHeaderSafeJson(obj) {
   );
 }
 
-function compareApiError (response: {error_summary: string}, expect: string[]): boolean {
-  return new RegExp('^' + expect.join('\\/') + '(\\/|$)').test(response.error_summary);
+function compareApiError (response: { error_summary?: string; error?: unknown }, tags: string[]): boolean {
+  if (new RegExp('^' + tags.join('\\/') + '(\\/|$)').test(response.error_summary)) { return true; }
+  let value = response.error;
+  for (const tag of tags) {
+    if (!value || typeof value !== 'object') { return false; }
+    // UploadError.path wraps its WriteError in a `reason` field.
+    if ('reason' in value) { value = value.reason; }
+    if (!value || typeof value !== 'object' || value['.tag'] !== tag) { return false; }
+    value = value[tag];
+  }
+  return true;
 }
 
 function isBinaryData (data): boolean {
@@ -483,10 +493,18 @@ class Dropbox extends RemoteBase implements Remote {
       throw new Error("not connected (path: " + path + ")");
     }
 
-    // check if file has changed and return 412
+    options = options || {};
+    if (options.ifNoneMatch && options.ifNoneMatch !== '*') {
+      throw new Error('Dropbox writes support only If-None-Match: *.');
+    }
+    if (options.ifMatch === '*' || options.ifMatch && options.ifNoneMatch) {
+      throw new Error('Dropbox updates require one exact revision condition.');
+    }
+    // Cache/metadata checks can reject early, but only the final upload can
+    // guard against an edit made by another client after these checks.
     const savedRev = this._revCache.get(path);
     if (options && options.ifMatch &&
-        savedRev && (savedRev !== options.ifMatch)) {
+        savedRev && savedRev !== 'rev' && (savedRev !== options.ifMatch)) {
       return {statusCode: 412, revision: savedRev};
     }
     if (options && (options.ifNoneMatch === '*') &&
@@ -503,7 +521,9 @@ class Dropbox extends RemoteBase implements Remote {
     const uploadParams = {
       body: body,
       contentType: contentType,
-      path: path
+      path: path,
+      ifMatch: options.ifMatch,
+      ifNoneMatch: options.ifNoneMatch
     };
 
     if (needsMetadata) {
@@ -516,10 +536,10 @@ class Dropbox extends RemoteBase implements Remote {
         };
       }
 
-      if (options && options.ifMatch && metadata && (metadata.rev !== options.ifMatch)) {
+      if (options.ifMatch && (!metadata || metadata.rev !== options.ifMatch)) {
         return {
           statusCode: 412,
-          revision: metadata.rev
+          revision: metadata?.rev
         };
       }
     }
@@ -546,23 +566,27 @@ class Dropbox extends RemoteBase implements Remote {
       throw new Error("not connected (path: " + path + ")");
     }
 
-    // check if file has changed and return 412
+    options = options || {};
+    if (options.ifMatch && (options.ifMatch === '*' || isFolder(path))) {
+      throw new Error('Dropbox conditional deletes require an exact file revision.');
+    }
+    // This is only an early rejection; parent_rev guards the final delete.
     const savedRev = this._revCache.get(path);
-    if (options?.ifMatch && savedRev && (options.ifMatch !== savedRev)) {
+    if (options?.ifMatch && savedRev && savedRev !== 'rev' && (options.ifMatch !== savedRev)) {
       return { statusCode: 412, revision: savedRev };
     }
 
     if (options?.ifMatch) {
       const metadata = await this._getMetadata(path);
-      if (options?.ifMatch && metadata && (metadata.rev !== options.ifMatch)) {
+      if (!metadata || metadata.rev !== options.ifMatch) {
         return {
           statusCode: 412,
-          revision: metadata.rev
+          revision: metadata?.rev
         };
       }
     }
 
-    return this._deleteSimple(path);
+    return this._deleteSimple(path, options.ifMatch);
   }
 
   /**
@@ -930,15 +954,18 @@ class Dropbox extends RemoteBase implements Remote {
    *
    * @private
    */
-  _uploadSimple (params: { body: XMLHttpRequestBodyInit; contentType?: string; path: string; ifMatch?: string; }): Promise<RemoteResponse> {
+  _uploadSimple (params: { body: XMLHttpRequestBodyInit; contentType?: string; path: string; ifMatch?: string; ifNoneMatch?: string; }): Promise<RemoteResponse> {
     const args = {
       path: getDropboxPath(params.path),
       mode: { '.tag': 'overwrite', update: undefined },
-      mute: true
+      mute: true,
+      ...(params.ifMatch || params.ifNoneMatch ? { autorename: false, strict_conflict: true } : {})
     };
 
     if (params.ifMatch) {
       args.mode = { '.tag': 'update', update: params.ifMatch };
+    } else if (params.ifNoneMatch === '*') {
+      args.mode = { '.tag': 'add', update: undefined };
     }
 
     return this._request('POST', UPLOAD_URL, {
@@ -965,7 +992,7 @@ class Dropbox extends RemoteBase implements Remote {
           return this._getMetadata(params.path).then(function (metadata) {
             return Promise.resolve({
               statusCode: 412,
-              revision: metadata.rev
+              revision: metadata?.rev
             });
           });
         }
@@ -990,10 +1017,11 @@ class Dropbox extends RemoteBase implements Remote {
    *
    * @private
    */
-  _deleteSimple (path: string): Promise<RemoteResponse> {
-    const requestBody = { path: getDropboxPath(path) };
+  _deleteSimple (path: string, ifMatch?: string): Promise<RemoteResponse> {
+    const requestBody = { path: getDropboxPath(path), ...(ifMatch ? { parent_rev: ifMatch } : {}) };
+    const endpoint = ifMatch ? CONDITIONAL_DELETE_URL : DELETE_URL;
 
-    return this._request('POST', DELETE_URL, { body: requestBody }).then((response) => {
+    return this._request('POST', endpoint, { body: requestBody }).then((response) => {
       if (response.status !== 200 && response.status !== 409) {
         return Promise.resolve({statusCode: response.status});
       }
@@ -1008,14 +1036,17 @@ class Dropbox extends RemoteBase implements Remote {
 
       if (response.status === 409) {
         if (compareApiError(responseBody, ['path_lookup', 'not_found'])) {
-          return Promise.resolve({statusCode: 404});
+          return Promise.resolve({statusCode: ifMatch ? 412 : 404});
+        }
+        if (ifMatch && compareApiError(responseBody, ['path_write', 'conflict'])) {
+          return Promise.resolve({statusCode: 412});
         }
         this.rs._emit('error', new Error(responseBody.error_summary));
       }
 
       return Promise.resolve({
         statusCode: response.status,
-        revision: response.status === 200 ? responseBody.rev : undefined
+        revision: response.status === 200 ? (ifMatch ? responseBody.metadata?.rev : responseBody.rev) : undefined
       });
     }).then(result => {
       if (result.statusCode === 200 || result.statusCode === 404) {
