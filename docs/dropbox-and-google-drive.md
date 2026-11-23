@@ -132,6 +132,28 @@ The regression suite uses deterministic HTTP fixtures, including nested sync,
 pagination failures, login changes, and conditional operations. It does not
 replace testing with a live Google account.
 
+## Dropbox conditional mutations
+
+Dropbox uploads enforce the revision at the final provider mutation. An update
+uses `WriteMode.update` with its exact revision; create-only writes use
+`WriteMode.add`. Both disable automatic renaming and enable `strict_conflict`,
+including when the current file has identical contents or was deleted after a
+metadata check. A stale condition returns HTTP 412 to the normal sync conflict
+handler. File bytes and paths retain the existing Dropbox format.
+
+Conditional file deletion uses `files/delete_v2` with `parent_rev`, so an edit
+made after the metadata precheck is not deleted. Dropbox does not support that
+condition for folders. Wildcard update/delete conditions and conditional folder
+deletions are rejected rather than silently sent as unconditional mutations.
+Unconditional file/folder operations retain their existing behavior.
+
+See the provider's [write-mode and strict-conflict definitions](https://dropbox.github.io/dropbox-sdk-js/global.html#FilesCommitInfo)
+and [conditional deletion contract](https://docs.dropboxapi.com/dropbox-api/api-reference/user-endpoints/files/delete-v-2).
+Two-client fixture tests verify the final mutation arguments and preserve the
+winning bytes during competing writes, create collisions, and stale deletions.
+These fixtures do not certify live Dropbox behavior; signed-in two-client
+acceptance is still required.
+
 ## Sharing public files via Dropbox
 
 [`BaseClient.getItemURL()`][1] is supported for the Dropbox backend. It returns a

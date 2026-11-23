@@ -37,6 +37,7 @@ export class MemoryStorage {
   clear() {
     this.map.clear();
   }
+
 }
 
 let localStorage, sessionStorage;

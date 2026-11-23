@@ -7,6 +7,7 @@ import fetchMock from 'fetch-mock';
 
 import { localStorage } from '../helpers/memoryStorage.mjs';
 import { backendBehavior } from '../helpers/backend-behavior.mjs';
+import { conditionalWriteContract } from '../helpers/conditional-write-contract.mjs';
 
 import config from "../../build/config.js";
 import Dropbox from "../../build/dropbox.js";
@@ -21,6 +22,7 @@ const FOLDER_URL = 'https://api.dropboxapi.com/2/files/list_folder';
 const DOWNLOAD_URL = 'https://content.dropboxapi.com/2/files/download';
 const UPLOAD_URL = 'https://content.dropboxapi.com/2/files/upload';
 const DELETE_URL = 'https://api.dropboxapi.com/2/files/delete';
+const CONDITIONAL_DELETE_URL = 'https://api.dropboxapi.com/2/files/delete_v2';
 const METADATA_URL = 'https://api.dropboxapi.com/2/files/get_metadata';
 const SHARING_URL = 'https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings';
 const USER_ADDRESS = 'smith@gmail.com';
@@ -1103,6 +1105,8 @@ describe('Dropbox backend', () => {
       expect(calls[0][1].body).to.equal(JSON.stringify({"path":"/remotestorage/mif/maf"}));
       expect(calls[1][0]).to.equal(UPLOAD_URL);
       expect(calls[1][1].body).to.equal("data");
+      expect(JSON.parse(calls[1][1].headers['Dropbox-API-Arg'])).to.include({ strict_conflict: true, autorename: false })
+        .and.have.deep.property('mode', { '.tag': 'update', update: '101' });
       expect(result).to.have.property('statusCode', 200);
       expect(result).to.have.property('revision', '102');
     });
@@ -1153,6 +1157,8 @@ describe('Dropbox backend', () => {
       expect(calls[0][1].body).to.equal(JSON.stringify({"path":"/remotestorage/zor/mop"}));
       expect(calls[1][0]).to.equal(UPLOAD_URL);
       expect(calls[1][1].body).to.equal("data");
+      expect(JSON.parse(calls[1][1].headers['Dropbox-API-Arg'])).to.include({ strict_conflict: true, autorename: false })
+        .and.have.deep.property('mode', { '.tag': 'add' });
       expect(result).to.have.property('statusCode', 200);
       expect(result).to.have.property('revision', '101');
     });
@@ -1186,6 +1192,104 @@ describe('Dropbox backend', () => {
       expect(result).to.have.property('statusCode', 409);
       expect(result).not.to.have.property('revision');
       expect(dropbox._revCache.get('/titi/toto')).to.be.a('string');
+    });
+  });
+
+  describe('provider-side conditional mutations', () => {
+    // This fixture enforces the documented provider primitives at the final
+    // mutation. Both adapters can finish their metadata checks before writing.
+    // It proves request semantics, not live Dropbox service behavior.
+    function fixture(initial, { prechecks = 2 } = {}) {
+      const path = '/conditional/file';
+      const other = new Dropbox(rs);
+      other.connected = true;
+      other._initialFetchDone = true;
+      const clients = [dropbox, other];
+      let sequence = 1, state = initial === undefined ? undefined : { body: initial, rev: String(sequence) };
+      let checks = 0, release;
+      const ready = new Promise(resolve => { release = resolve; });
+      let beforeUpload, beforeDelete;
+      const metadata = () => state && { '.tag': 'file', rev: state.rev, path_display: '/remotestorage' + path };
+      const missing = () => ({ status: 409, body: { error_summary: 'path/not_found/', error: { '.tag': 'path', path: { '.tag': 'not_found' } } } });
+      fetchMock.mock({ method: 'POST', url: METADATA_URL }, async () => {
+        const snapshot = metadata();
+        if (++checks === prechecks) { release(); }
+        await ready;
+        return snapshot ? { status: 200, body: snapshot } : missing();
+      });
+      fetchMock.mock({ method: 'GET', url: DOWNLOAD_URL }, () => state ? {
+        status: 200, body: state.body, headers: { 'Content-Type': 'text/plain', 'Dropbox-API-Result': JSON.stringify(metadata()) }
+      } : missing());
+      fetchMock.mock({ method: 'POST', url: UPLOAD_URL }, (_url, options) => {
+        beforeUpload?.();
+        const args = JSON.parse(new Headers(options.headers).get('Dropbox-API-Arg'));
+        const mismatch = args.mode['.tag'] === 'update' && state?.rev !== args.mode.update;
+        const collision = args.mode['.tag'] === 'add' && state;
+        if ((mismatch || collision) && (args.strict_conflict || state?.body !== options.body)) {
+          return { status: 409, body: { error: { '.tag': 'path', path: { reason: { '.tag': 'conflict', conflict: { '.tag': 'file' } } } } } };
+        }
+        state = { body: options.body, rev: String(++sequence) };
+        return { status: 200, body: metadata() };
+      });
+      fetchMock.mock({ method: 'POST', url: CONDITIONAL_DELETE_URL }, (_url, options) => {
+        beforeDelete?.();
+        const args = JSON.parse(options.body);
+        if (!state || args.parent_rev !== state.rev) {
+          return { status: 409, body: { error: { '.tag': 'path_lookup', path_lookup: { '.tag': 'not_found' } } } };
+        }
+        const removed = metadata(); state = undefined;
+        return { status: 200, body: { metadata: removed } };
+      });
+      return { clients, path, beforeUpload(callback) { beforeUpload = callback; }, beforeDelete(callback) { beforeDelete = callback; },
+        nativeWrite(body) { state = body === undefined ? undefined : { body, rev: String(++sequence) }; } };
+    }
+
+    conditionalWriteContract(fixture);
+
+    it('refuses an update if the file disappeared after its metadata check', async () => {
+      const f = fixture('base', { prechecks: 1 });
+      f.beforeUpload(() => f.nativeWrite(undefined));
+      expect((await dropbox.put(f.path, 'new', 'text/plain', { ifMatch: '1' })).statusCode).to.equal(412);
+      expect((await dropbox.get(f.path)).statusCode).to.equal(404);
+    });
+
+    it('keeps create-only strict even when a concurrent creator wrote identical bytes', async () => {
+      const f = fixture(undefined, { prechecks: 1 });
+      f.beforeUpload(() => f.nativeWrite('same'));
+      expect((await dropbox.put(f.path, 'same', 'text/plain', { ifNoneMatch: '*' })).statusCode).to.equal(412);
+      expect((await dropbox.get(f.path)).body).to.equal('same');
+    });
+
+    it('rejects a stale update even when the current bytes are identical', async () => {
+      const f = fixture('same', { prechecks: 1 });
+      f.beforeUpload(() => f.nativeWrite('same'));
+      expect((await dropbox.put(f.path, 'same', 'text/plain', { ifMatch: '1' })).statusCode).to.equal(412);
+      expect((await dropbox.get(f.path)).revision).to.equal('2');
+    });
+
+    it('does not delete an edit made after its metadata check', async () => {
+      const f = fixture('base', { prechecks: 1 });
+      f.beforeDelete(() => f.nativeWrite('foreign edit'));
+      expect((await dropbox.delete(f.path, { ifMatch: '1' })).statusCode).to.equal(412);
+      expect((await dropbox.get(f.path)).body).to.equal('foreign edit');
+      const mutation = fetchMock.calls(CONDITIONAL_DELETE_URL)[0][1];
+      expect(JSON.parse(mutation.body).parent_rev).to.equal('1');
+    });
+
+    it('maps a nested final-delete conflict to 412 without clearing cached metadata', async () => {
+      dropbox._revCache.set('/file', '1');
+      sandbox.stub(dropbox, '_getMetadata').resolves({ rev: '1' });
+      fetchMock.mock({ method: 'POST', url: CONDITIONAL_DELETE_URL }, { status: 409,
+        body: { error: { '.tag': 'path_write', path_write: { '.tag': 'conflict', conflict: { '.tag': 'file' } } } } });
+      expect((await dropbox.delete('/file', { ifMatch: '1' })).statusCode).to.equal(412);
+      expect(dropbox._revCache.get('/file')).to.equal('1');
+    });
+
+    it('rejects unsupported conditions before sending a mutation', async () => {
+      await expect(dropbox.put('/file', 'data', 'text/plain', { ifNoneMatch: 'rev' })).to.be.rejectedWith('only If-None-Match');
+      await expect(dropbox.put('/file', 'data', 'text/plain', { ifMatch: '*' })).to.be.rejectedWith('exact revision');
+      await expect(dropbox.delete('/folder/', { ifMatch: 'rev' })).to.be.rejectedWith('exact file revision');
+      expect(fetchMock.calls()).to.have.lengthOf(0);
     });
   });
 
@@ -1242,17 +1346,17 @@ describe('Dropbox backend', () => {
         {status: 200, body: JSON.stringify(metadata)}
       );
       fetchMock.mock(
-        {name: 'postDelete', method: 'POST', url: DELETE_URL},
-        {status: 200, body: JSON.stringify(metadata)}
+        {name: 'postDelete', method: 'POST', url: CONDITIONAL_DELETE_URL},
+        {status: 200, body: JSON.stringify({ metadata })}
       );
       const result = await dropbox.delete('/fnord/xyzzy', {ifMatch: metadata.rev});
 
       const calls = fetchMock.calls();
       expect(calls).to.have.lengthOf(2);
-      expect(calls[1][0]).to.equal(DELETE_URL);
+      expect(calls[1][0]).to.equal(CONDITIONAL_DELETE_URL);
       expect(calls[1][1]).to.have.property('method', 'POST');
       expect(calls[1][1].headers).to.have.property('Content-Type').which.matches(/^application\/json\b/);
-      expect(calls[1][1]).to.have.property('body', JSON.stringify({path: "/remotestorage/fnord/xyzzy"}));
+      expect(calls[1][1]).to.have.property('body', JSON.stringify({path: "/remotestorage/fnord/xyzzy", parent_rev: metadata.rev}));
       expect(result).to.have.property('statusCode', 200);
       expect(result).to.have.property('revision', metadata.rev);
       expect(dropbox._revCache.get('/fnord/xyzzy')).to.be.null;

@@ -1045,6 +1045,52 @@ describe("Sync", function() {
       });
     });
 
+    it("fetches an unknown create conflict once and lets the app retain its local candidate", async function() {
+      const path = "/foo/new.txt";
+      await this.rs.local.setNodes({ [path]: {
+        path, common: {},
+        local: { body: "edited while offline", contentType: "text/plain" },
+        push: { body: "edited while offline", contentType: "text/plain" }
+      } });
+      const remote = this.rs.remote;
+      const get = sinon.stub(remote, "get").resolves({
+        statusCode: 200, body: "first revision", contentType: "text/plain", revision: "server-revision"
+      });
+
+      // The first create reached the server, but its acknowledgement was lost.
+      // A later create-only retry must inspect that unknown remote version.
+      await this.rs.sync.handleResponse(path, "put", { statusCode: 412 });
+      let node = (await this.rs.local.getNodes([path]))[path];
+      expect(node.remote).to.have.property("revision", "conflict");
+      expect(node.local.body).to.equal("edited while offline");
+      expect(node.push).to.be.undefined;
+      const fetch = await this.rs.sync.doTask(path);
+      expect(fetch.action).to.equal("get");
+      expect(get.calledOnceWithExactly(path)).to.be.true;
+
+      const conflict = new Promise(resolve => this.rs.local.on("change", change => {
+        if (change.origin === "conflict") { resolve(change); }
+      }));
+      await this.rs.sync.handleResponse(path, "get", await fetch.promise);
+      const candidates = await conflict;
+      expect(candidates.oldValue).to.equal("edited while offline");
+      expect(candidates.newValue).to.equal("first revision");
+      expect(candidates.lastCommonValue).to.be.undefined;
+
+      // An explicit application decision can retain its candidate, conditioned
+      // on the remote version just reviewed rather than another blind create.
+      const put = sinon.stub(remote, "put").resolves({ statusCode: 200, revision: "chosen-revision" });
+      await this.rs.local.put(path, candidates.oldValue, candidates.oldContentType);
+      const choice = await this.rs.sync.doTask(path);
+      expect(choice.action).to.equal("put");
+      expect(put.calledOnceWithExactly(path, "edited while offline", "text/plain", { ifMatch: "server-revision" })).to.be.true;
+      await this.rs.sync.handleResponse(path, "put", await choice.promise);
+      node = (await this.rs.local.getNodes([path]))[path];
+      expect(node.common.body).to.equal("edited while offline");
+      expect(node.common.revision).to.equal("chosen-revision");
+      expect(node.local).to.be.undefined;
+    });
+
     describe("401 response", function() {
       it("emits Unauthorized error", function(done) {
         this.rs.on("error", function(err) {

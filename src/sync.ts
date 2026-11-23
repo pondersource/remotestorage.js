@@ -83,7 +83,9 @@ function hasNoRemoteChanges (node: RSNode): boolean {
     return false;
   }
   return (node.common.body === undefined && node.remote.body === false) ||
-         (equal(node.remote.body, node.common.body) &&
+         // A nonempty, unfetched revision has no body. Two unknown bodies are
+         // not evidence of equality: keep that marker for the next fetch.
+         ((!node.remote.revision || node.remote.body !== undefined) && equal(node.remote.body, node.common.body) &&
           node.remote.contentType === node.common.contentType);
 }
 
@@ -357,7 +359,7 @@ export class Sync {
       if (!node.common.timestamp) {
         return true;
       }
-      return (this.now() - node.common.timestamp > config.syncInterval);
+      return (this.now() - node.common.timestamp > Math.max(config.syncInterval, this.rs.remote.minRefreshInterval || 0));
     }
     return false;
   }
@@ -431,13 +433,22 @@ export class Sync {
    * Collect tasks to refresh highest outdated folder in tree
    */
   async collectRefreshTasks (): Promise<void> {
+    const cachedFolders = new Set<string>();
+    if (this.rs.remote.folderETagsAreRecursive === false) {
+      await this._sessionLocal.forAllNodes((node: RSNode) => {
+        if (isFolder(node.path) && this.rs.access.checkPathPermission(node.path, 'r') &&
+            this.rs.caching.checkPath(node.path) !== 'FLUSH') { cachedFolders.add(node.path); }
+      });
+    }
     await this._sessionLocal.forAllNodes((node: RSNode) => {
       let parentPath: string;
       if (this.needsRefresh(node)) {
-        // Solid container validators do not cover descendants. Unwatched paths
-        // need individual checks; watched paths recover on socket open/renewal.
+        // Check every cached container: its own validator does not cover its
+        // descendants. Child HEAD metadata then selects changed files to fetch,
+        // avoiding an additional routine GET for every file in the same folder.
         if (this.rs.remote.folderETagsAreRecursive === false) {
-          if (this.rs.remote.hasActiveSubscription?.(node.path)) { return; }
+          if (!isFolder(node.path) && (cachedFolders.has(this.getParentPath(node.path)) ||
+              this.rs.remote.hasActiveSubscription?.(node.path))) { return; }
           if (this.rs.access.checkPathPermission(node.path, 'r')) { this.addTask(node.path); }
           return;
         }
@@ -495,8 +506,9 @@ export class Sync {
       else if (isStaleChild(node)) {
         return taskFor('get', path, this.rs.remote.get(path));
       }
-      // A successful write may omit ETag. Its body is known, but another
-      // mutation must revalidate before choosing a conditional write token.
+      // A successful write can omit its ETag. Before another mutation, fetch
+      // and compare the acknowledged representation instead of treating an
+      // existing document as a create or attaching a later unrelated validator.
       else if (!hasCommonRevision(node) && node.common?.body !== undefined &&
                node.common.body !== false &&
                (this.needsRemotePut(node) || this.needsRemoteDelete(node))) {
@@ -603,9 +615,8 @@ export class Sync {
   autoMergeDocument (node: RSNode): RSNode {
     if (hasNoRemoteChanges(node)) {
       node = mergeMutualDeletion(node);
-      // Recover an omitted validator only after GET confirms that the remote
-      // representation still equals the last acknowledged body. A different
-      // body continues through the normal conflict path, preserving both sides.
+      // Only adopt a missing write validator when readback confirms that the
+      // bytes and media type still equal the acknowledged common version.
       if (!node.common.revision && node.remote.revision &&
           node.common.body !== undefined && node.remote.body !== false) {
         node.common = node.remote;
@@ -1435,7 +1446,8 @@ export class Sync {
       this.doTasks();
       // All stale resources may be subscribed. Complete the idle cycle too,
       // so the next timer can poll resources whose subscription later fails.
-      if (this.isCurrentSession() && !this.hasTasks() && !Object.keys(this._running).length && !this.done) {
+      if (this.rs.backend === 'solid' && this.isCurrentSession() && !this.hasTasks() &&
+          !Object.keys(this._running).length && !this.done) {
         this.done = true;
         this.rs._emit('sync-done', { completed: true });
       }

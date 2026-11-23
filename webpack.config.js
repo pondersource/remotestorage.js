@@ -14,7 +14,7 @@ const plugins = isProd ? [
 ] : [];
 
 module.exports = (env = {}) => ({
-  entry: [env.solid ? './src/remotestorage-solid.ts' : './src/remotestorage.ts'],
+  entry: [env.all ? './src/remotestorage-all.ts' : env.solid ? './src/remotestorage-solid.ts' : './src/remotestorage.ts'],
   devtool: 'source-map',
   // the only external dependecy is xmlhttprequest because it is
   // different in browser and in node env so user has to manage with that
@@ -22,6 +22,10 @@ module.exports = (env = {}) => ({
   plugins: plugins,
   module: {
     rules: [
+      {
+        test: /[/\\]@ng-org[/\\]web[/\\]dist[/\\]ngweb\.umd\.cjs$/,
+        use: path.resolve(__dirname, 'scripts/nextgraph-csp-loader.cjs'),
+      },
       {
         test: /[/\\]solid\.ts$/,
         // Select the SDKs' ESM exports even though tsc emits require() for
@@ -40,7 +44,7 @@ module.exports = (env = {}) => ({
   },
   output: {
     path: path.resolve(__dirname, 'release'),
-    filename: env.solid ? 'remotestorage-solid.js' : 'remotestorage.js',
+    filename: env.all ? 'remotestorage-all.js' : env.solid ? 'remotestorage-solid.js' : 'remotestorage.js',
     library: {
       name: 'RemoteStorage',
       type: 'umd',
