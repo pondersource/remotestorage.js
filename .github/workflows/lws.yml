@@ -59,6 +59,8 @@ jobs:
         run: |
           git -C .lws-server apply --check ../test/fixtures/lws-server/read-lifetimes.patch
           git -C .lws-server apply ../test/fixtures/lws-server/read-lifetimes.patch
+          git -C .lws-server apply --check ../test/fixtures/lws-server/early-response.patch
+          git -C .lws-server apply ../test/fixtures/lws-server/early-response.patch
       - name: Verify and build the patched provider, including its regression tests
         run: mvn -B -q -f .lws-server/pom.xml verify
       - run: npm ci --ignore-scripts
