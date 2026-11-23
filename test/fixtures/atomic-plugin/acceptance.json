@@ -1,0 +1,28 @@
+{
+  "date": "2026-11-23",
+  "result": "one actual Chromium journey passed",
+  "setup": "disposable account/drive/plugin draft created through the pinned native Rust API; installation review and app consent used the native browser UI",
+  "hostSource": "eac358358d2e565867c5bc8a416e4a5840551e08",
+  "hostBinarySha256": "703890c5f8ae7592c6140c1f2475ab8337331e6f85fc9e65a1ce57dca499cb2b",
+  "browserWasmSha256": "cddcb98dd0f6302336548e1cb4572f0613a1eee49c73d1b11117135b7ef99c6f",
+  "pluginSource": "7a81b11fb9d224adc4037fee6493dce62e020ab0",
+  "pluginBundleSha256": "dffe3b7320ee696fe00fe7feac6b25aaeea6ffe3e39aafdfaf616aad14e0b593",
+  "sdkBundleSha256": "9e3d17d894765cb9eca44264ee700b8182f06f50a80139f19ca0599e178762db",
+  "widgetBundleSha256": "ba56426df06e42c218cde6f3e2d108229d1c18f190c078aa424c50d4960ed417",
+  "journeySourceSha256": "262eda09170f2a61de89c518905ec3df44a42c8ba3317ec1ae4e7de1d433e58f",
+  "assertions": [
+    "native installation review and route-write approval",
+    "native app consent for notes:rw",
+    "exact private JSON text, MIME parameters and binary bytes",
+    "anonymous 401 and unclaimed scope 403",
+    "provider outage retains edited data through reload and reconnect",
+    "fresh signed-in browser reads the same documents",
+    "two writes with one live ETag yield one success and one 412"
+  ],
+  "notCertified": [
+    "new-account browser genesis onboarding",
+    "a deployed AtomicServer",
+    "other host revisions or source-to-binary reproducibility",
+    "different SDK runtime bytes"
+  ]
+}
