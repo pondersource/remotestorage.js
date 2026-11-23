@@ -68,10 +68,8 @@ export function decodeRecord(value: unknown): { body: any; contentType: string }
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
     catch { /* Keep non-UTF-8 files readable as their original bytes. */ }
   }
-  let body: unknown = text === undefined ? bytes.buffer : text;
-  if (text !== undefined && /(?:\/|\+)json(?:;|$)/.test(record.contentType)) {
-    try { body = JSON.parse(text); }
-    catch { /* getFile can inspect malformed JSON; getObject reports its parse error. */ }
-  }
-  return { contentType: record.contentType, body };
+  // Match WireClient's transport contract: JSON files are serialized text.
+  // BaseClient.getObject parses them; Sync compares these original bytes with
+  // the serialized common version before adopting a missing write validator.
+  return { contentType: record.contentType, body: text === undefined ? bytes.buffer : text };
 }

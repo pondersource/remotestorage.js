@@ -4,6 +4,7 @@ use(chaiAsPromised);
 import OneDrive from '../../build/onedrive.js';
 import { RemoteStorage } from '../../build/remotestorage.js';
 import { encodeName, decodeName, encodeRecord, decodeRecord } from '../../build/onedrive-format.js';
+import { jsonReadbackContract } from '../helpers/json-readback-contract.mjs';
 
 function fixture() {
   const calls = [], events = [];
@@ -146,7 +147,7 @@ describe('OneDrive experimental backend', function() {
     expect(decodeName(encodeName('café: notes?.json'))).to.equal('café: notes?.json');
     for (const [body, contentType, expected] of [
       ['hello 😀', 'text/plain;charset=utf-8', 'hello 😀'],
-      ['{"title":"Café"}', 'application/json', { title: 'Café' }],
+      ['{"title":"Café"}', 'application/json', '{"title":"Café"}'],
       [new Uint8Array([0, 255, 1]).buffer, 'image/png', new Uint8Array([0, 255, 1]).buffer]
     ]) {
       expect(decodeRecord(JSON.parse(await encodeRecord(body, contentType)))).to.deep.equal({ body: expected, contentType });
@@ -171,6 +172,14 @@ describe('OneDrive experimental backend', function() {
     expect((await f.backend.get('/note', { ifNoneMatch: '1' })).statusCode).to.equal(304);
     expect((await f.backend.get('/note', { ifNoneMatch: '*' })).statusCode).to.equal(304);
     expect((await f.backend.get('/note', { ifMatch: '*' })).statusCode).to.equal(200);
+  });
+
+  it('preserves JSON text through real Sync revalidation of an acknowledged write', async function() {
+    const f = fixture(); await f.backend.connect();
+    const acknowledged = '{ "title": "first", "unknown": [1, 2] }\n';
+    f.routes.set(item + encodeName('note'), () => json({ id: 'note', eTag: '"verified"', '@microsoft.graph.downloadUrl': 'https://download.example.test/file' }));
+    f.routes.set('https://download.example.test/file', async () => json(JSON.parse(await encodeRecord(acknowledged, 'application/json'))));
+    await jsonReadbackContract(await f.backend.get('/note'), acknowledged, '{"title":"pending"}');
   });
 
   it('never attaches an old validator to bytes from a concurrent edit', async function() {

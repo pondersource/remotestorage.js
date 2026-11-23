@@ -3,6 +3,7 @@ import { createRequire, registerHooks } from 'node:module';
 import { Access } from '../../build/access.js';
 import { documentRevision, documentHeads, readLedger } from '../../build/document-ledger.js';
 import { encodeRecord } from '../../build/onedrive-format.js';
+import { jsonReadbackContract } from '../helpers/json-readback-contract.mjs';
 
 // Replace only the native SDK boundary. These tests do not establish wallet or
 // broker interoperability; the production bundle uses the pinned real SDKs.
@@ -56,6 +57,12 @@ describe('Nextgraph document ledger (native SDK boundary mocked)', function() {
     expect(await f.backend.get('/notes/a')).to.include({statusCode:200,body:'hello',revision:created.revision});
     expect((await f.backend.put('/notes/a','collision','text/plain',{ifNoneMatch:'*'})).statusCode).to.equal(412);
     expect((await f.backend.put('/notes/a','stale','text/plain',{ifMatch:'stale'})).statusCode).to.equal(412);
+  });
+  it('preserves JSON text through real Sync revalidation of an acknowledged write', async function() {
+    const f = fixture(); await f.backend.connect();
+    const acknowledged = '{ "title": "first", "unknown": [1, 2] }\n';
+    await f.backend.put('/notes/record.json', acknowledged, 'application/json');
+    await jsonReadbackContract(await f.backend.get('/notes/record.json'), acknowledged, '{"title":"pending"}');
   });
   it('retains concurrent edits and edit/delete conflicts until explicit resolution', async function() {
     const f=fixture(); await f.backend.connect();

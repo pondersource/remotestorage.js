@@ -168,3 +168,55 @@ npm run test:lws:interop
 This open-mode target exercises storage and browser/CORS interoperability. It
 does not establish real-provider OpenID interoperability; the signed-token and
 PKCE tests cover that flow separately with controlled identity responses.
+
+## Public roots and projected member types
+
+A public storage root does not imply anonymous access to the app's private
+resources. If neither the supplied resource nor its root sends a metadata
+challenge, discovery also queries the RFC 9728 protected-resource metadata URL
+for that exact resource path and query. The metadata must identify that exact
+resource and advertise valid authorization servers. Only a missing metadata
+endpoint (404 or 410) permits open-mode fallback; denied, malformed or failed
+metadata requests do not silently downgrade authentication. This lookup also
+keeps the storage/issuer binding reproducible after the OpenID redirect.
+
+Some container listings project a custom member media type as
+`application/octet-stream`. Index discovery uses at most four concurrent HEAD
+requests for members with missing/generic types, checks their actual media type,
+and then validates the index document's media type, version, storage and entries.
+It does not inspect arbitrary binary/JSON bodies to guess which file is an
+index, and still stops if multiple indexes are present. A failed metadata HEAD
+cannot be treated as an absent index and cause another index to be created.
+
+The `css-public-discovery` CI job builds CSS-LWS at
+`ef6d664f1253662cbfcb0f1786fe45d32849e067` and reproduces these two real server
+behaviors on a disposable loopback Pod. Its index API test uses an explicitly
+public writable test namespace; it does not certify private access or complete
+OpenID login. Run it against an installed/built checkout with:
+
+```sh
+LWS_CSS_SERVER_DIR=/path/to/CommunitySolidServer node --test test/lws-css-auth.test.mjs
+```
+
+An OpenID client registration and the configured `idTokenSigningAlg` must agree
+with the chosen identity provider. For example, the pinned CSS-LWS fixture uses
+an explicitly registered ES256 client and `idTokenSigningAlg: 'ES256'`; the
+adapter's default is RS256. Scopes and token claims remain verified by the
+normal OpenID/token-exchange path.
+
+## JSON readback after a write
+
+Some servers acknowledge a successful write without an ETag. Before the next
+conditional mutation, Sync fetches the acknowledged content and adopts its
+validator only if the bytes and media type still match. LWS returns JSON as
+serialized text, matching the cached `storeObject` body and WireClient's
+transport contract; `BaseClient.getObject` performs the JSON parsing. Parsing
+inside the backend would turn unchanged text into an object, falsely report a
+conflict, and discard the pending edit through normal conflict handling.
+
+The browser regression covers JSON creation, a subsequent edit, and retrieval
+in a fresh browser after suppressing write-response ETags. The separate lost
+acknowledgement case still retains genuinely different conflict candidates.
+The OneDrive/Nextgraph shared record decoder follows the same text contract;
+their adapter-boundary tests exercise actual Sync cache revalidation, without
+claiming live Microsoft or wallet/broker acceptance.

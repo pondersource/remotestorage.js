@@ -63,3 +63,25 @@ jobs:
         env:
           LWS_SERVER_KIND: ebremer
         run: node scripts/run-lwsd-interop.mjs
+  css-public-discovery:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/checkout@v4
+        with:
+          repository: jeswr/CommunitySolidServer
+          ref: ef6d664f1253662cbfcb0f1786fe45d32849e067
+          path: .css-lws
+          persist-credentials: false
+      - run: npm ci --ignore-scripts
+      - run: npm run build:js
+      - run: npm ci --prefix .css-lws --ignore-scripts
+      - run: npm run build --prefix .css-lws
+      - name: Real CSS-LWS public-root auth discovery and native index projection
+        env:
+          LWS_CSS_SERVER_DIR: .css-lws
+        run: node --test test/lws-css-auth.test.mjs

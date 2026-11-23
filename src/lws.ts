@@ -293,7 +293,9 @@ class LWS extends RemoteBase implements Remote {
       delete result.revision;
     } else if (/^(text\/|application\/(?:[^;]+\+)?json\b)/i.test(result.contentType || '')) {
       const text = await response.text();
-      result.body = /json/i.test(result.contentType) ? JSON.parse(text) : text;
+      // Remote responses retain wire text, as WireClient does. BaseClient's
+      // object API parses JSON; the sync cache must compare identical body types.
+      result.body = text;
     } else {
       result.body = await response.arrayBuffer();
     }

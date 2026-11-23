@@ -13,13 +13,13 @@ test('real LWS server: create, reload, conditional update, listing and delete', 
   const resource = a.getFileURL(path);
   const b = await client();
   const first = await b.get(path);
-  assert.equal(first.statusCode, 200); assert.deepEqual(first.body, { title: 'first' });
+  assert.equal(first.statusCode, 200); assert.deepEqual(JSON.parse(first.body), { title: 'first' });
   assert.equal(b.getFileURL(path), resource);
   assert.equal((await b.put(path, '{"title":"do not overwrite"}', 'application/json', { ifNoneMatch: '*' })).statusCode, 412);
   assert.ok([200, 204].includes((await b.put(path, '{"title":"second"}', 'application/json', { ifMatch: first.revision })).statusCode));
   assert.equal((await a.delete(path, { ifMatch: first.revision })).statusCode, 412);
   const updated = await a.get(path);
-  assert.equal(updated.body.title, 'second');
+  assert.equal(JSON.parse(updated.body).title, 'second');
   assert.ok((await a.get(path.slice(0, path.lastIndexOf('/') + 1))).body['note.json']);
   assert.ok([200, 204].includes((await a.delete(path, { ifMatch: updated.revision })).statusCode));
   assert.equal((await b.get(path)).statusCode, 404);
