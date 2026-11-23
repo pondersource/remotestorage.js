@@ -215,7 +215,8 @@ describe('OneDrive backend', () => {
   });
 
   it('does not revive saved credentials after an explicit clear before startup restoration', async () => {
-    const clock = sinon.useFakeTimers();
+    // Only the adapter's timers are relevant; leave Node's microtask queue real.
+    const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     localStorage.setItem('remotestorage:onedrive', JSON.stringify({ token: 'saved' }));
     rs.backend = 'onedrive';
     backend = rs.onedrive = new OneDrive(rs);
@@ -227,7 +228,7 @@ describe('OneDrive backend', () => {
   });
 
   it('times out a response body that stalls after headers arrive', async () => {
-    const clock = sinon.useFakeTimers();
+    const clock = sinon.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const timeout = config.requestTimeout;
     config.requestTimeout = 25;
     let stream;
