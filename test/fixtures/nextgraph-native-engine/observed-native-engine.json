@@ -1,0 +1,343 @@
+{
+  "provenance": {
+    "sourceCommit": "8ac2676245768e4e72c1df5c1b524e559bcd3b5c",
+    "sourceRepository": "https://git.nextgraph.org/NextGraph/nextgraph-rs",
+    "bridgeFiles": {
+      "main.ts": "f8f99730d66d99b06a14c5203ac66655cf144537a6aa65e122fb3ca205941c54",
+      "wasm-worker.js": "a929ae0ce6075def52eb61b5c367424e7231ed4571b7529b45402c3d9bea0ecb",
+      "worker.js": "5ed25f5cb8f30c7ce32d76d429780ae7ea56913578a933be25182d7f08fdfada",
+      "package.json": "37921f21188e1ea93aa5a826aca3b7101dd0ae389568930cab699d66383cf5a5"
+    },
+    "wasm": {
+      "package": "@ng-org/lib-wasm",
+      "version": "0.1.2-alpha.9",
+      "url": "https://registry.npmjs.org/@ng-org/lib-wasm/-/lib-wasm-0.1.2-alpha.9.tgz",
+      "archiveSha256": "6eed862907cd9f198fbe94ad123fe987d570339d497fc67b539809597b0b7e77",
+      "runtimeSha256": "d76013b1def3e6ddd68531b596ab55b971fa85e3a9efa794e1e59908848286ad"
+    },
+    "ormVersion": "0.1.2-alpha.25",
+    "productionWebVersion": "0.1.2-alpha.17",
+    "productionWebSDKUsed": false,
+    "notes": "The published WASM has no gitHead. The listed source commit matches package versions; source-to-binary reproducibility is not asserted. The byte-exact API bridge is compiled only for this disposable fixture. No wallet consent or broker delivery is simulated or claimed."
+  },
+  "evidence": [
+    {
+      "boundary": "same-tab-reload",
+      "commitResolved": true,
+      "before": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70415
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "576a588ca8f4d078b76c2aba1ef6e5b50e7b3c261d1a731c89613949a077f2a8",
+        "document": {
+          "record": "same-tab-candidate"
+        },
+        "failedOutboxWrites": 0,
+        "independentEngineReadMatched": true
+      },
+      "after": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70415
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "576a588ca8f4d078b76c2aba1ef6e5b50e7b3c261d1a731c89613949a077f2a8",
+        "failedOutboxWrites": 0
+      },
+      "reopened": {
+        "opened": false,
+        "reason": "Native ORM document did not reopen offline"
+      }
+    },
+    {
+      "boundary": "tab-close",
+      "commitResolved": true,
+      "before": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70418
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "e977df7e0a520064e1012cd90bc5d69785f6fad088ea78ba2390450a7e5e61e2",
+        "document": {
+          "record": "closed-tab-candidate"
+        },
+        "failedOutboxWrites": 0,
+        "independentEngineReadMatched": true
+      },
+      "after": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          }
+        },
+        "outboxEntries": 0,
+        "outboxDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "failedOutboxWrites": 0
+      },
+      "reopened": {
+        "opened": false,
+        "reason": "Native ORM document did not reopen offline"
+      },
+      "explicitExportPreserved": true
+    },
+    {
+      "boundary": "cold-browser-restart",
+      "commitResolved": true,
+      "before": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70420
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "e3cacda0ca6273bc5bf6f9d75d78be8ec7de60aa337d0b32b7db24b1c999649f",
+        "document": {
+          "record": "cold-browser-candidate"
+        },
+        "failedOutboxWrites": 0,
+        "independentEngineReadMatched": true
+      },
+      "after": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          }
+        },
+        "outboxEntries": 0,
+        "outboxDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "failedOutboxWrites": 0
+      },
+      "reopened": {
+        "opened": false,
+        "reason": "Native ORM document did not reopen offline"
+      },
+      "explicitExportPreserved": true
+    },
+    {
+      "boundary": "export-import",
+      "walletImported": true,
+      "walletOnly": {
+        "opened": false,
+        "reason": "Native ORM document did not reopen offline"
+      },
+      "explicitDocumentRoundTrip": true,
+      "document": {
+        "record": "exported-document-candidate"
+      }
+    },
+    {
+      "boundary": "outbox-storage-failure",
+      "commitRejected": false,
+      "commitResolvedDespiteStorageError": true,
+      "nativeMemoryChanged": true,
+      "candidatePreservedByExplicitExport": true,
+      "before": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70428
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "fce257ec78015b70721f346eb0a924e7d7b21d1eb832037627c8ee5705241ae9",
+        "document": {
+          "record": "acknowledged-local-candidate"
+        },
+        "failedOutboxWrites": 0,
+        "independentEngineReadMatched": true
+      },
+      "after": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70428
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "fce257ec78015b70721f346eb0a924e7d7b21d1eb832037627c8ee5705241ae9",
+        "document": {
+          "record": "unpersisted-candidate"
+        },
+        "failedOutboxWrites": 1
+      }
+    },
+    {
+      "boundary": "pre-handshake-connection-failure",
+      "errors": [
+        "ConnectionError"
+      ],
+      "before": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70423
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "7cc28a7970f10a6a8842342407bbebc0324a16682461e3250737e13f8ac4b678",
+        "document": {
+          "record": "pending-broker-candidate"
+        },
+        "failedOutboxWrites": 0,
+        "independentEngineReadMatched": true
+      },
+      "after": {
+        "local": {
+          "ng_wallets": {
+            "entries": 1,
+            "bytes": 1272
+          }
+        },
+        "session": {
+          "ng_outboxes": {
+            "entries": 51,
+            "bytes": 70423
+          },
+          "ng_wallet": {
+            "entries": 1,
+            "bytes": 226
+          },
+          "ng_peer_last_seq": {
+            "entries": 1,
+            "bytes": 12
+          }
+        },
+        "outboxEntries": 51,
+        "outboxDigest": "7cc28a7970f10a6a8842342407bbebc0324a16682461e3250737e13f8ac4b678",
+        "document": {
+          "record": "pending-broker-candidate"
+        },
+        "failedOutboxWrites": 0
+      },
+      "brokerDeliveryTested": false
+    }
+  ],
+  "limits": [
+    "Disposable wallets only; no native wallet consent UI was accepted.",
+    "No ngd broker ran: post-handshake delivery, replication and broker durability remain untested.",
+    "A failed connection does not exercise send_outbox after a successful handshake.",
+    "Browser storage was not replaced; the sole injected fault throws from real sessionStorage writes."
+  ]
+}

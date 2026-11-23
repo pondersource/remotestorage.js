@@ -64,9 +64,15 @@ test('single all-backend bundle runs under strict CSP and the real SDK commits t
  await appFrame.evaluate(id=>rs.nextgraph.resolveConflict('/notes/a',id),second.revision);
  assert.equal((await appFrame.evaluate(()=>rs.nextgraph.get('/notes/a'))).body,'left');
  await page.evaluate(()=>window.failSave=true);
- const failed=await appFrame.evaluate(async()=>{try{await rs.nextgraph.put('/notes/b','data','text/plain');}catch(e){return {message:e.message,connected:rs.nextgraph.connected,state:rs.nextgraph.deliveryState,reload:rs.nextgraph.requiresReload};}});
- assert.match(failed.message,/Disk full/);assert.equal(failed.connected,false);assert.equal(failed.state,'needs-attention');assert.equal(failed.reload,true);
- const retry=await appFrame.evaluate(async()=>{try{await rs.nextgraph.connect();}catch(e){return e.message;}});assert.match(retry,/Reload/);
+ const failed=await appFrame.evaluate(async()=>{
+  const result=await rs.nextgraph.put('/notes/b','data','text/plain');
+  return {status:result.statusCode,body:(await rs.nextgraph.get('/notes/b')).body,errors,
+   connected:rs.nextgraph.connected,state:rs.nextgraph.deliveryState,reload:rs.nextgraph.requiresReload};
+ });
+ assert.equal(failed.status,201);assert.equal(failed.body,'data');assert.ok(failed.errors.some(message=>message.includes('Disk full')));
+ assert.equal(failed.connected,true);assert.equal(failed.state,'needs-attention');assert.equal(failed.reload,true);
+ const recovery=await appFrame.evaluate(()=>rs.nextgraph.exportRecovery());
+ assert.ok(recovery.records.some(record=>record.path==='/notes/b'));
  assert.deepEqual(errors,[]);
  assert.deepEqual(await appFrame.evaluate(()=>cspViolations),[]);
  assert.deepEqual(await page.evaluate(()=>cspViolations),[]);
