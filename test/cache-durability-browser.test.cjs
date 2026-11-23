@@ -32,11 +32,12 @@ before(async () => {
     }
     response.writeHead(200, { 'Content-Type': 'text/html' });
     response.end(`<!doctype html><script src="/fixture.js"></script><script>
-      window.openCache=async name=>{
+      window.openCache=async (name,constrained)=>{
         const db=await new Promise((resolve,reject)=>{
           const request=indexedDB.open(name,2);
           request.onupgradeneeded=()=>{
-            request.result.createObjectStore('nodes',{keyPath:'path'});
+            const nodes=request.result.createObjectStore('nodes',{keyPath:'path'});
+            if(constrained)nodes.createIndex('unique-label','label',{unique:true});
             request.result.createObjectStore('changes',{keyPath:'path'});
           };
           request.onsuccess=()=>resolve(request.result);
@@ -57,10 +58,10 @@ after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
   if (directory) await rm(directory, { recursive: true, force: true });
 });
-async function pageWithCache(context, name) {
+async function pageWithCache(context, name, constrained = false) {
   const page = await context.newPage();
   await page.goto(address);
-  await page.evaluate(name => openCache(name), name);
+  await page.evaluate(({ name, constrained }) => openCache(name, constrained), { name, constrained });
   return page;
 }
 
@@ -100,6 +101,80 @@ test('real IndexedDB writes resolve after commit and aborts reject without a pha
     assert.equal(result.committedWhenResolved, true);
     assert.equal(result.failed.rejected, true);
     assert.equal(result.visible, 'committed');
+    assert.equal(result.running, 0);
+  } finally { await context.close(); }
+});
+
+test('a real DataCloneError rolls back the partial batch before releasing its cache lock', async () => {
+  const context = await browser.newContext();
+  try {
+    const page = await pageWithCache(context, 'clone-failure-' + crypto.randomUUID());
+    const result = await page.evaluate(async () => {
+      await cache.setNodes({ '/notes/a': row('before') });
+      const transaction = cache.db.transaction.bind(cache.db);
+      let aborted = false;
+      cache.db.transaction = (...args) => {
+        const tx = transaction(...args);
+        if (args[1] === 'readwrite') tx.addEventListener('abort', () => { aborted = true; });
+        return tx;
+      };
+      const failed = await CacheFixture.transaction(cache, () => cache.setNodes({
+        '/notes/a': row('must roll back'),
+        '/notes/invalid': { ...row('invalid'), path: '/notes/invalid', uncloneable() {} }
+      })).then(() => ({ rejected: false }), error => ({ rejected: true, message: String(error), abortedWhenRejected: aborted }));
+      const nodes = await cache.getNodes(['/notes/a', '/notes/invalid']);
+      return { failed, visible: nodes['/notes/a'].common.body, invalidExists: !!nodes['/notes/invalid'], running: cache.putsRunning };
+    });
+    assert.equal(result.failed.rejected, true);
+    assert.match(result.failed.message, /DataCloneError/);
+    assert.equal(result.failed.abortedWhenRejected, true);
+    assert.equal(result.visible, 'before');
+    assert.equal(result.invalidExists, false);
+    assert.equal(result.running, 0);
+  } finally { await context.close(); }
+});
+
+test('a canceled request error still aborts the whole real IndexedDB batch', async () => {
+  const context = await browser.newContext();
+  try {
+    const page = await pageWithCache(context, 'constraint-failure-' + crypto.randomUUID(), true);
+    const result = await page.evaluate(async () => {
+      await cache.setNodes({
+        '/notes/a': { ...row('before'), label: 'one' },
+        '/notes/protected': { ...row('protected'), path: '/notes/protected', label: 'taken' }
+      });
+      const transaction = cache.db.transaction.bind(cache.db);
+      let aborted = false, prevented = false;
+      cache.db.transaction = (...args) => {
+        const tx = transaction(...args);
+        if (args[1] === 'readwrite') {
+          tx.addEventListener('abort', () => { aborted = true; });
+          const objectStore = tx.objectStore.bind(tx);
+          tx.objectStore = name => {
+            const store = objectStore(name), put = store.put.bind(store);
+            store.put = value => {
+              const request = put(value);
+              request.addEventListener('error', event => { prevented = true; event.preventDefault(); });
+              return request;
+            };
+            return store;
+          };
+        }
+        return tx;
+      };
+      const failed = await CacheFixture.transaction(cache, () => cache.setNodes({
+        '/notes/a': { ...row('must roll back'), label: 'one' },
+        '/notes/invalid': { ...row('invalid'), path: '/notes/invalid', label: 'taken' }
+      })).then(() => ({ rejected: false }), error => ({ rejected: true, message: String(error), abortedWhenRejected: aborted }));
+      const nodes = await cache.getNodes(['/notes/a', '/notes/invalid']);
+      return { failed, prevented, visible: nodes['/notes/a'].common.body, invalidExists: !!nodes['/notes/invalid'], running: cache.putsRunning };
+    });
+    assert.equal(result.prevented, true);
+    assert.equal(result.failed.rejected, true);
+    assert.equal(result.visible, 'before', JSON.stringify(result));
+    assert.match(result.failed.message, /ConstraintError/);
+    assert.equal(result.failed.abortedWhenRejected, true);
+    assert.equal(result.invalidExists, false);
     assert.equal(result.running, 0);
   } finally { await context.close(); }
 });

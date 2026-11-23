@@ -59,7 +59,7 @@ class IndexedDB extends CachingLayer {
   changesQueued: { [key: string]: unknown };
   changesRunning: { [key: string]: unknown };
   commitSlownessWarning: any; // TODO null | number (but node's setInterval returns an unknown type)
-  private queuedWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
+  private queuedWaiters: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
 
   constructor(database) {
     super();
@@ -174,7 +174,7 @@ class IndexedDB extends CachingLayer {
       this.queuedWaiters = [];
       const finish = (succeeded: boolean, error?: unknown): void => {
         if (this.changesRunning === batch) { this.changesRunning = {}; }
-        const failure = error instanceof Error ? error : new Error(String(error || 'IndexedDB write failed'));
+        const failure = error ?? new Error('IndexedDB write failed');
         for (const waiter of waiters) {
           if (succeeded) { waiter.resolve(); } else { waiter.reject(failure); }
         }
@@ -225,28 +225,43 @@ class IndexedDB extends CachingLayer {
     return new Promise((resolve, reject) => {
 
       const transaction = this.db.transaction(['nodes'], 'readwrite');
-      const nodesStore = transaction.objectStore('nodes');
       const startTime = new Date().getTime();
 
       this.putsRunning++;
       let settled = false;
-      const finish = (error?: unknown): void => {
+      let failed = false;
+      let failure: unknown;
+      const finish = (succeeded: boolean, error?: unknown): void => {
         if (settled) { return; }
         settled = true;
         this.putsRunning--;
-        if (error) { reject(error); } else { resolve(); }
+        if (succeeded) { resolve(); } else { reject(error); }
+      };
+      const abort = (error: unknown): void => {
+        if (settled) { return; }
+        if (!failed) { failed = true; failure = error; }
+        // Request errors may have had preventDefault() called by a listener.
+        // Abort explicitly, then retain the lock/overlay until the terminal event.
+        try { transaction.abort(); } catch { /* abort or completion already queued */ }
       };
 
       transaction.oncomplete = () => {
         log('[IndexedDB] Finished puts', nodes, this.putsRunning, (new Date().getTime() - startTime) + 'ms');
-        finish();
+        finish(!failed, failure);
       };
-      transaction.onerror = () => finish(transaction.error || new Error('IndexedDB write transaction error'));
-      transaction.onabort = () => finish(transaction.error || new Error('IndexedDB write transaction aborted'));
+      transaction.onerror = (event?: Event) => {
+        const request = event?.target as IDBRequest | undefined;
+        const error = transaction.error || request?.error || new Error('IndexedDB write transaction error');
+        event?.preventDefault();
+        abort(error);
+      };
+      transaction.onabort = () => finish(false, failed ? failure :
+        transaction.error || new Error('IndexedDB write transaction aborted'));
 
       log('[IndexedDB] Starting puts', nodes, this.putsRunning);
 
       try {
+        const nodesStore = transaction.objectStore('nodes');
         for (const path in nodes) {
           const node = nodes[path];
           if (typeof (node) === 'object') {
@@ -256,8 +271,7 @@ class IndexedDB extends CachingLayer {
           }
         }
       } catch (error) {
-        try { transaction.abort(); } catch { /* already inactive */ }
-        finish(error);
+        abort(error);
       }
     });
   }

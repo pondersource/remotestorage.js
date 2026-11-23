@@ -26,7 +26,10 @@ function manualDatabase() {
           for (const operation of operations) { operation(); }
           transaction.oncomplete();
         },
-        abort() { queueMicrotask(() => transaction.onabort()); }
+        abort() {
+          transaction.abortRequested = true;
+          if (!database.holdAbort) { queueMicrotask(() => transaction.onabort()); }
+        }
       };
       transactions.push(transaction);
       return transaction;
@@ -108,6 +111,33 @@ describe("cache durability", () => {
     expect(cache.putsRunning).to.equal(0);
     expect(cache.changesRunning).to.deep.equal({});
   });
+
+  for (const synchronous of [false, true]) {
+    it("waits for abort completion after " + (synchronous ? "a synchronous put failure" : "a request error"), async () => {
+      const { cache, database, transactions } = manualDatabase();
+      const original = new Error("original write failure");
+      database.holdAbort = true;
+      if (synchronous) { database.putError = original; }
+      let settled = false;
+      const failed = cache.setNodes({ "/notes/a": node("aborted") }).then(
+        () => { settled = true; }, error => { settled = true; return error; }
+      );
+      const transaction = transactions[0];
+      if (!synchronous) {
+        transaction.onerror({ target: { error: original }, preventDefault() {} });
+      }
+      try {
+        await microtasks();
+        expect(transaction.abortRequested).to.equal(true);
+        expect(settled).to.equal(false);
+        expect(cache.putsRunning).to.equal(1);
+        expect(cache.changesRunning).to.have.property("/notes/a");
+      } finally { transaction.onabort(); }
+      expect(await failed).to.equal(original);
+      expect(cache.putsRunning).to.equal(0);
+      expect(cache.changesRunning).to.deep.equal({});
+    });
+  }
 
   it("rejects a synchronous put failure and leaves the cache able to commit another batch", async () => {
     const { cache, database, transactions } = manualDatabase();
