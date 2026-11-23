@@ -1,0 +1,65 @@
+name: LWS backend
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: lws-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lws:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build:js
+      - run: npm run build:all
+      - run: node --test test/lws*.test.mjs
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --config=playwright.lws.config.cjs
+      - name: Check out independent LWSD implementation
+        uses: actions/checkout@v4
+        with:
+          repository: linkedwebstorage/lwsd
+          ref: 421aaf1b52dd4478eb386b950d3c3da81b658e9b
+          path: .lwsd
+          persist-credentials: false
+      - run: npm install --prefix .lwsd --ignore-scripts --no-save --no-audit --no-fund javascript-solid-server@0.0.222
+      # The raw target is intentionally not patched: its non-atomic index writes
+      # remain a visible diagnostic failure, not a writable-sync compatibility claim.
+      - name: LWSD interoperability diagnostics (known concurrency failure)
+        continue-on-error: true
+        run: node scripts/run-lwsd-interop.mjs
+  transactional-server:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/checkout@v4
+        with:
+          repository: ebremer/lws-server
+          ref: 97e8ace5f7b0da890b4f8cd96eadec505e1fb16e
+          path: .lws-server
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+      - run: mvn -B -q -f .lws-server/pom.xml -Dmaven.test.skip=true package
+      - run: npm ci --ignore-scripts
+      - run: npm run build:js
+      - run: npm run build:all
+      - run: npx playwright install --with-deps chromium
+      - name: Transactional LWS server interoperability and browser offline sync
+        env:
+          LWS_SERVER_KIND: ebremer
+        run: node scripts/run-lwsd-interop.mjs

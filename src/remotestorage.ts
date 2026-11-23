@@ -29,6 +29,9 @@ import { Remote, noRefreshSettings } from "./remote";
 import type { AuthorizeOptions } from './authorize';
 import type { StorageInfo } from './interfaces/storage_info';
 import type { Sync } from './sync';
+import type LWS from './lws';
+import type OneDrive from './onedrive';
+import type NextGraph from './nextgraph';
 import type { SolidBackend, SolidFeature } from './interfaces/solid-backend';
 
 // TODO this is assigned to RemoteStorage.util later; check if still needed
@@ -84,7 +87,7 @@ const AUTHORIZED_SCOPE_KEY = 'remotestorage:authorized-scope';
 const PENDING_SCOPE_KEY = 'remotestorage:pending-scope';
 
 interface StoredScopeSettings {
-  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid';
+  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph';
   scope?: string;
 }
 
@@ -178,7 +181,8 @@ export interface RSModule {
 
 enum ApiKeyType {
   GOOGLE = 'googledrive',
-  DROPBOX = 'dropbox'
+  DROPBOX = 'dropbox',
+  ONEDRIVE = 'onedrive'
 }
 
 /**
@@ -375,6 +379,10 @@ enum ApiKeyType {
 export class RemoteStorage {
   /** Optional backend supplied by the Solid entry point. @internal */
   static Solid?: SolidFeature;
+  static LWS?: typeof LWS;
+  static OneDrive?: typeof OneDrive;
+  static NextGraph?: typeof NextGraph;
+  static AtomicPlugin?: boolean;
 
   /**
    * Pending get/put/delete calls
@@ -398,7 +406,7 @@ export class RemoteStorage {
    * Holds OAuth app keys for Dropbox, Google Drive
    * @internal
    */
-  apiKeys: {googledrive?: {clientId: string}; dropbox?: {appKey: string}} = {};
+  apiKeys: {googledrive?: {clientId: string}; dropbox?: {appKey: string}; onedrive?: {clientId: string}} = {};
 
   /**
    * Managing claimed access scopes
@@ -438,7 +446,7 @@ export class RemoteStorage {
 
   /**
    */
-  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid';
+  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph';
 
   /**
    * Depending on the chosen backend, this is either an instance of `WireClient`,
@@ -472,6 +480,10 @@ export class RemoteStorage {
   googledrive: GoogleDrive;
   /** Solid backend, available with the optional Solid entry point. */
   solid?: SolidBackend;
+  lws?: LWS;
+  onedrive?: OneDrive;
+  nextgraph?: NextGraph;
+  _lwsPreviousRemote?: Remote;
 
   /**
    * @internal
@@ -518,7 +530,10 @@ export class RemoteStorage {
       const backendType = localStorage.getItem('remotestorage:backend');
 
       if (backendType === 'dropbox' || backendType === 'googledrive' ||
-          (backendType === 'solid' && (this.constructor as typeof RemoteStorage).Solid)) {
+          (backendType === 'solid' && (this.constructor as typeof RemoteStorage).Solid) ||
+          (backendType === 'lws' && (this.constructor as typeof RemoteStorage).LWS) ||
+          (backendType === 'onedrive' && (this.constructor as typeof RemoteStorage).OneDrive) ||
+          (backendType === 'nextgraph' && (this.constructor as typeof RemoteStorage).NextGraph)) {
         this.setBackend(backendType);
       } else {
         this.setBackend('remotestorage');
@@ -847,7 +862,10 @@ export class RemoteStorage {
     if (this.backend === 'remotestorage') {
       this.connect(this.remote.userAddress);
     } else {
-      this.remote.connect();
+      const remote = this.remote;
+      Promise.resolve(remote.connect()).catch(error => {
+        if (this.remote === remote) { this._emit('error', error); }
+      });
     }
   }
 
@@ -914,7 +932,7 @@ export class RemoteStorage {
   /**
    * @internal
    */
-  setBackend (backendType?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid'): void {
+  setBackend (backendType?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph'): void {
     this.backend = backendType;
 
     if (hasLocalStorage) {
@@ -1125,7 +1143,7 @@ export class RemoteStorage {
    * });
    */
   setApiKeys (apiKeys: {[key in ApiKeyType]?: string}): void | boolean {
-    const validTypes: string[] = [ApiKeyType.GOOGLE, ApiKeyType.DROPBOX];
+    const validTypes: string[] = [ApiKeyType.GOOGLE, ApiKeyType.DROPBOX, ApiKeyType.ONEDRIVE];
     if (typeof apiKeys !== 'object' || !Object.keys(apiKeys).every(type => validTypes.includes(type))) {
       console.error('setApiKeys() was called with invalid arguments') ;
       return false;
@@ -1136,6 +1154,10 @@ export class RemoteStorage {
       if (!key) { delete this.apiKeys[type]; return; }
 
       switch(type) {
+        case ApiKeyType.ONEDRIVE:
+          this.apiKeys.onedrive = { clientId: key };
+          if (this.onedrive) { this.onedrive.setClientId(key); }
+          break;
         case ApiKeyType.DROPBOX:
           this.apiKeys[ApiKeyType.DROPBOX] = { appKey: key };
           if (typeof this.dropbox === 'undefined' ||

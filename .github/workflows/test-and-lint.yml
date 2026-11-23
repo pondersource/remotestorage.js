@@ -39,6 +39,8 @@ jobs:
         run: npm run build:release
       - name: Build optional Solid bundle
         run: npm run build:solid
+      - name: Build all-backend bundle
+        run: npm run build:all
 
   solid-browser:
     name: Solid two-browser sync
@@ -56,3 +58,20 @@ jobs:
       - run: npm ci --prefix examples/solid
       - run: npm run test:install-browser --prefix examples/solid -- --with-deps
       - run: npm run test:browser --prefix examples/solid
+
+  nextgraph-browser:
+    name: Nextgraph native SDK protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6.3.0
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run build:all
+      - run: npx playwright install --with-deps chromium
+      # Real web/ORM packages; simulated wallet channel, no broker claim.
+      - run: node --test test/nextgraph-browser.test.cjs
