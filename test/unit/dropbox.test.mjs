@@ -621,7 +621,7 @@ describe('Dropbox backend', () => {
     });
 
     /* also happy path */
-    it('JSON file returns parsed JSON', async () => {
+    it('JSON file preserves text and still guesses JSON MIME', async () => {
       const OBJECT = {
         openapi: "3.1.0",
         servers: [
@@ -651,7 +651,7 @@ describe('Dropbox backend', () => {
       expect(calls[0][1].headers).to.have.property('Authorization', 'Bearer ' + ACCESS_TOKEN);
       expect(calls[0][1].headers).to.have.property('Dropbox-API-Arg', JSON.stringify({path: '/remotestorage/garply/waldo'}));
       expect(result).to.have.property('statusCode', 200);
-      expect(result).to.have.property('body').which.deep.equals(OBJECT);
+      expect(result).to.have.property('body').which.equals(CONTENT);
       expect(result).to.have.property('contentType').and.match(/^application\/json\b/);
       expect(result).to.have.property('revision', REVISION);
     });

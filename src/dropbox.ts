@@ -451,9 +451,10 @@ class Dropbox extends RemoteBase implements Remote {
           // return unprocessed response
           body = resp.response;
         } else {
-          // handling json (always try)
+          // Preserve JSON text for Sync's acknowledged-body comparison. Keep
+          // the existing MIME guess; BaseClient.getObject performs parsing.
           try {
-            body = JSON.parse(body);
+            JSON.parse(body);
             mime = 'application/json; charset=UTF-8';
           } catch(e) {
             //Failed parsing Json, assume it is something else then
