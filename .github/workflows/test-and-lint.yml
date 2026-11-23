@@ -2,9 +2,9 @@ name: Test and lint
 
 on:
   push:
-    branches: [ master, stable ]
+    branches: [ master, stable, distribution ]
   pull_request:
-    branches: [ master, stable, review/storage-distribution-base ]
+    branches: [ master, stable, distribution, review/storage-distribution-base ]
 
 permissions: {}
 
