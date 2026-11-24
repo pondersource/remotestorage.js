@@ -12,6 +12,21 @@ it does not log the user out of their wallet globally. A wallet that does not
 return consent stops the UI attempt after two minutes with reload guidance.
 A late successful native session is retained; the SDK is initialized only once.
 
+The widget offers a **Wallet server**, defaulting to `https://nextgraph.net`.
+Applications can also call `rs.nextgraph.connect('https://wallet.example')`
+and read `getWalletURL()`. Use an HTTPS origin without a path, query, fragment
+or credentials; loopback HTTP is supported for development. This selects the
+wallet frontend, not a broker. The same origin receives consent and all SDK RPCs.
+The audited, hash-pinned build patch adds this optional origin to the official
+web SDK's `init`; it retains the native wallet protocol and engine.
+
+The public `rs-nextgraph-wallet` app URL parameter carries the choice through
+a redirect into a separate browser-storage partition, retaining app routing and
+history state. It only prefills a destination. On a first visit in a new partition,
+confirm the choice in the widget again. Only a previously selected backend and
+matching remembered wallet may resume silently. Changing servers after SDK
+initialization requires a reload, so an old session cannot go to another origin.
+
 A private-store RDF marker discovers one native Automerge JSON document across
 sessions. A second visible collection is an error requiring reconciliation.
 The JSON document stores immutable revisions in separate UUID map keys. Each

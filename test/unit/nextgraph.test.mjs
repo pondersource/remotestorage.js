@@ -52,6 +52,22 @@ describe('Nextgraph document ledger (native SDK boundary mocked)', function() {
     expect(f.backend.connected).to.equal(false);
     expect(sdkLoads).to.equal(0);
   });
+  it('never treats a wallet URL hint as consent to a new wallet origin', function() {
+    const previous = globalThis.window;
+    try {
+      globalThis.window = { self: {}, top: {}, location: {href:'https://app.example/?rs-nextgraph-wallet=https%3A%2F%2Fother-wallet.example'},
+        localStorage: {getItem:()=>'https://nextgraph.net'}, addEventListener() {} };
+      const f = fixture(), handlers = [];
+      f.rs.backend = 'nextgraph'; f.rs.on = (...args) => handlers.push(args);
+      NextGraph._rs_init(f.rs);
+      expect(f.rs.nextgraph.getWalletURL()).to.equal('https://other-wallet.example');
+      expect(handlers).to.deep.equal([]);
+      window.location.href = 'https://app.example/?rs-nextgraph-wallet=https%3A%2F%2Fnextgraph.net';
+      NextGraph._rs_init(f.rs);
+      expect(handlers).to.have.length(1);
+      expect(handlers[0][0]).to.equal('features-loaded');
+    } finally { if (previous === undefined) { delete globalThis.window; } else { globalThis.window = previous; } }
+  });
   it('opens the private collection and writes through an awaited native transaction', async function() {
     const f = fixture(); await f.backend.connect();
     const created = await f.backend.put('/notes/a', 'hello', 'text/plain', {ifNoneMatch:'*'});
@@ -60,6 +76,15 @@ describe('Nextgraph document ledger (native SDK boundary mocked)', function() {
     expect(await f.backend.get('/notes/a')).to.include({statusCode:200,body:'hello',revision:created.revision});
     expect((await f.backend.put('/notes/a','collision','text/plain',{ifNoneMatch:'*'})).statusCode).to.equal(412);
     expect((await f.backend.put('/notes/a','stale','text/plain',{ifMatch:'stale'})).statusCode).to.equal(412);
+  });
+  it('requires a reload before using a different wallet after native initialization', async function() {
+    const f = fixture();
+    let error;
+    try { await f.backend.connect('https://another-wallet.example'); } catch (value) { error = value; }
+    expect(error?.message).to.match(/Reload this app/);
+    expect(f.backend.getWalletURL()).to.equal('https://nextgraph.net');
+    await f.backend.connect();
+    expect(f.backend.connected).to.equal(true);
   });
   it('preserves JSON text through real Sync revalidation of an acknowledged write', async function() {
     const f = fixture(); await f.backend.connect();
