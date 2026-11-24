@@ -7,19 +7,22 @@ const {chromium}=require('@playwright/test');
 // Allow only our served scripts and a fixed nonce for fixture setup. Neither
 // the standalone app nor the wallet/iframe can use unsafe-eval or unnonced scripts.
 const csp={ 'Content-Security-Policy': "script-src 'self' 'nonce-rs-nextgraph-fixture'; object-src 'none'; base-uri 'none'" };
-test('single all-backend bundle runs under strict CSP and the real SDK commits through the wallet channel',async t=>{
+for (const walletOrigin of ['https://nextgraph.net','https://wallet.example.test']) {
+test('strict CSP, selected wallet redirect and real SDK RPC: '+walletOrigin,async t=>{
  const bundle=readFileSync(require.resolve('../release/remotestorage-all.js'));
  const appHtml=`<!doctype html><script src="/rs.js"></script><button id="connect">Connect Nextgraph</button><script nonce="rs-nextgraph-fixture">
    window.errors=[];window.rs=new RemoteStorage({cache:false,modules:[{name:'notes',builder(client){client.declareType('note',{type:'object'});return{exports:{write:(path,value)=>client.storeObject('note',path,value),read:path=>client.getObject(path)}}}}]});rs.access.claim('notes','rw');
    rs.on('error',e=>errors.push(e.message));rs.on('ready',()=>window.ready=true);
-   document.querySelector('button').onclick=()=>rs.nextgraph.connect().then(()=>window.opened=true).catch(e=>errors.push(e.message));
+   document.querySelector('button').onclick=()=>rs.nextgraph.connect(${JSON.stringify(walletOrigin)}).then(()=>window.opened=true).catch(e=>errors.push(e.message));
   </script>`;
  const origin='https://app.example.test';
- const browser=await chromium.launch();t.after(()=>browser.close());
+ const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH});t.after(()=>browser.close());
  const page=await browser.newPage();const errors=[];page.on('pageerror',error=>errors.push(error.message));
  await page.addInitScript(()=>{window.cspViolations=[];document.addEventListener('securitypolicyviolation',event=>cspViolations.push({directive:event.violatedDirective,blocked:event.blockedURI}));});
+ // Exercise a first iframe visit with no preference from the standalone app.
+ await page.addInitScript(()=>{if(window.self!==window.top&&!sessionStorage.getItem('wallet-partition-started')){localStorage.clear();sessionStorage.setItem('wallet-partition-started','true');}});
  await page.route(origin+'/**',route=>route.fulfill({headers:csp,contentType:route.request().url().endsWith('/rs.js')?'text/javascript':'text/html',body:route.request().url().endsWith('/rs.js')?bundle:appHtml}));
- await page.route('https://nextgraph.net/**',route=>route.fulfill({headers:csp,contentType:'text/html',body:`<!doctype html><iframe src="${origin}/"></iframe><script nonce="rs-nextgraph-fixture">
+ await page.route(walletOrigin+'/**',route=>route.fulfill({headers:csp,contentType:'text/html',body:`<!doctype html><iframe src="${origin}/?rs-nextgraph-wallet=${encodeURIComponent(walletOrigin)}"></iframe><script nonce="rs-nextgraph-fixture">
   window.calls=[];window.ledger={};window.ports=[];
   window.addEventListener('message',event=>{
    if(event.origin!==${JSON.stringify(origin)}||event.source!==document.querySelector('iframe').contentWindow)return;
@@ -39,10 +42,14 @@ test('single all-backend bundle runs under strict CSP and the real SDK commits t
  assert.equal(page.url(),origin+'/');
  assert.deepEqual(await page.evaluate(()=>cspViolations),[]);
  await page.locator('#connect').click();
- await page.waitForURL('https://nextgraph.net/**');
- assert.equal(new URLSearchParams(page.url().split('#/?')[1]).get('o'),origin+'/');
- const frame=await page.frameLocator('iframe');await frame.locator('#connect').click();
- const appFrame=page.frames().find(frame=>frame.url()===origin+'/');
+ await page.waitForURL(walletOrigin+'/**');
+ const returnedApp = new URL(new URLSearchParams(page.url().split('#/?')[1]).get('o'));
+ assert.equal(returnedApp.origin,origin);
+ assert.equal(returnedApp.searchParams.get('rs-nextgraph-wallet'),walletOrigin);
+ const frame=page.frameLocator('iframe');await frame.locator('#connect').waitFor();
+ const appFrame=page.frames().find(frame=>frame.url().startsWith(origin+'/'));
+ assert.equal(await appFrame.evaluate(()=>rs.nextgraph.connected),false);
+ await frame.locator('#connect').click();
  await appFrame.waitForFunction(()=>rs.nextgraph.connected);
  const first=await appFrame.evaluate(()=>rs.nextgraph.put('/notes/a','hello','text/plain'));
  assert.equal(first.statusCode,201);
@@ -79,8 +86,8 @@ test('single all-backend bundle runs under strict CSP and the real SDK commits t
  // A wallet that does not return consent must not leave the app waiting forever.
  const stalled=await browser.newPage();await stalled.clock.install();
  await stalled.route(origin+'/**',route=>route.fulfill({headers:csp,contentType:route.request().url().endsWith('/rs.js')?'text/javascript':'text/html',body:route.request().url().endsWith('/rs.js')?bundle:appHtml}));
- await stalled.route('https://nextgraph.net/**',route=>route.fulfill({headers:csp,contentType:'text/html',body:'<iframe src="'+origin+'/"></iframe>'}));
- await stalled.goto('https://nextgraph.net/redir/');
+ await stalled.route(walletOrigin+'/**',route=>route.fulfill({headers:csp,contentType:'text/html',body:'<iframe src="'+origin+'/"></iframe>'}));
+ await stalled.goto(walletOrigin+'/redir/');
  await stalled.frameLocator('iframe').locator('#connect').waitFor();
  const blocked=stalled.frames().find(frame=>frame.url()===origin+'/');
  await blocked.waitForFunction(()=>window.ready);await blocked.locator('#connect').click();
@@ -89,3 +96,4 @@ test('single all-backend bundle runs under strict CSP and the real SDK commits t
  assert.equal(await blocked.evaluate(()=>rs.nextgraph.connected),false);
  await stalled.close();
 });
+}

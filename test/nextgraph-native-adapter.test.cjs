@@ -9,7 +9,7 @@ async function attach(page) {
   await page.evaluate(() => native.attachAdapter());
   await page.locator('iframe').waitFor();
   const frame = page.frames().find(item => item.parentFrame());
-  await frame.waitForURL('**/adapter.html');
+  await frame.waitForURL(url => url.pathname === '/adapter.html' && url.searchParams.get('rs-nextgraph-wallet') === 'https://nextgraph.net');
   await frame.waitForFunction(() => window.adapterReady || window.adapterError);
   const error = await frame.evaluate(() => window.adapterError);
   assert.equal(error, undefined);
@@ -187,7 +187,7 @@ test('preview6 native-acknowledged IndexedDB cache survives uncertain first jour
     await page.evaluate(() => native.attachAdapter('upgrade'));
     await page.locator('iframe').waitFor();
     const frame = page.frames().find(item => item.parentFrame());
-    await frame.waitForURL('**/adapter.html?upgrade=1');
+    await frame.waitForURL(url => url.pathname === '/adapter.html' && url.searchParams.get('upgrade') === '1');
     await frame.waitForFunction(() => window.adapterError);
     assert.match(await frame.evaluate(() => adapterError), /Existing cached documents need explicit recovery/);
     const recovered = await frame.evaluate(async () => ({
@@ -234,7 +234,7 @@ test('same-origin tabs serialize first collection selection and atomically enfor
     await second.evaluate(() => native.attachAdapter());
     await second.locator('iframe').waitFor();
     const secondFrame = second.frames().find(item => item.parentFrame());
-    await secondFrame.waitForURL('**/adapter.html');
+    await secondFrame.waitForURL(url => url.pathname === '/adapter.html');
     await secondFrame.waitForFunction(async () => (await navigator.locks.query()).pending.some(lock => lock.name.startsWith('remotestorage:nextgraph-collection:')));
     assert.equal((await second.evaluate(() => native.rpcCounts())).sparql_query || 0, 0);
     await first.evaluate(() => native.releaseDiscovery());

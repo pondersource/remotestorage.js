@@ -5,6 +5,7 @@ import type RemoteStorage from './remotestorage';
 import { decodeRecord, encodeRecord, unbase64url, type OneDriveRecord } from './onedrive-format';
 import { readLedger, documentHeads, documentRevision, validateDocumentPath, type DocumentRevision } from './document-ledger';
 import { NextGraphJournal, mergeJournalRecords } from './nextgraph-journal';
+import { DEFAULT_WALLET_URL, normalizeWalletURL, requestedWalletURL, rememberWalletURL, rememberedWalletURL, forgetWalletHandoff } from './nextgraph-wallet';
 
 const COLLECTION = 'https://pondersource.com/ns/remotestorage/DocumentLedgerV1';
 interface NativeSDK {
@@ -13,6 +14,7 @@ interface NativeSDK {
 }
 let sdkPromise: Promise<NativeSDK>;
 let sessionPromise: Promise<Session>;
+let sessionWalletURL: string;
 
 /** Load native SDK values only after a connection request, never at app startup. */
 function nativeSDK(): Promise<NativeSDK> {
@@ -36,13 +38,19 @@ function nativeSDK(): Promise<NativeSDK> {
 }
 const failedCollections = new Set<string>();
 const collectionOwners = new Map<string, NextGraph>();
-function nativeSession(sdk: NativeSDK): Promise<Session> {
+function nativeSession(sdk: NativeSDK, walletURL: string): Promise<Session> {
+  if (sessionPromise && sessionWalletURL !== walletURL) {
+    return Promise.reject(new Error('Reload this app before changing Nextgraph wallet servers.'));
+  }
   if (!sessionPromise) {
+    sessionWalletURL = walletURL;
     sessionPromise = new Promise<Session>((resolve, reject) => {
-      sdk.web.init(event => {
+      // The audited build patch adds an optional origin to the pinned SDK's init.
+      const init = sdk.web.init as (callback: Parameters<NativeSDK['web']['init']>[0], singleton: boolean, requests: [], origin: string) => Promise<void>;
+      init(event => {
         if (event.status !== 'loggedin' || !event.session?.private_store_id) { reject(new Error('Nextgraph did not return a private store.')); return; }
         sdk.orm.initNg(sdk.web.ng, event.session); resolve(event.session);
-      }, true, []).catch(reject);
+      }, true, [], walletURL).catch(reject);
     }).catch(error => { sessionPromise = undefined; throw error; });
   }
   // The pinned web SDK does not deliver a rejection event when wallet consent
@@ -82,6 +90,11 @@ interface CacheRecoveryCandidate {
  * local journal completion nor SDK completion acknowledges broker delivery.
  */
 class NextGraph extends RemoteBase implements Remote {
+  private walletURL = requestedWalletURL() || rememberedWalletURL() || DEFAULT_WALLET_URL;
+
+  /** Wallet frontend origin; not the address of a broker or a private store. */
+  getWalletURL(): string { return this.walletURL; }
+
   readonly supportsAtomicCreate = false;
   getStorageIdentity(): string { return JSON.stringify([this.session?.private_store_id || '', this.collection || '']); }
   folderETagsAreRecursive = false;
@@ -116,20 +129,26 @@ class NextGraph extends RemoteBase implements Remote {
       this.subscription?.close(); this.subscription = undefined; this.documents = undefined;
     }
     if (settings.userAddress === null) {
+      forgetWalletHandoff();
       this.session = undefined; this.userAddress = undefined; this.collection = undefined;
       this.journal = undefined; this.archived = [];
     }
   }
 
   /** Native wallet consent may navigate/reload the app inside Nextgraph. */
-  async connect(): Promise<void> {
+  async connect(walletURL = this.walletURL): Promise<void> {
     if (this.connecting) { throw new Error('A Nextgraph connection is already in progress.'); }
+    const origin = normalizeWalletURL(walletURL);
+    if (sessionPromise && sessionWalletURL !== origin) { throw new Error('Reload this app before changing Nextgraph wallet servers.'); }
+    this.walletURL = origin;
     this.connecting = true;
     const generation = this.generation;
     try {
       const sdk = await nativeSDK();
+      if (sessionPromise && sessionWalletURL !== origin) { throw new Error('Reload this app before changing Nextgraph wallet servers.'); }
+      rememberWalletURL(origin);
       this.rs.setBackend('nextgraph');
-      const session = await nativeSession(sdk);
+      const session = await nativeSession(sdk, origin);
       const select = async (): Promise<void> => {
         if (generation !== this.generation) { throw new Error('Nextgraph connection was cancelled.'); }
         await this.open();
@@ -167,7 +186,7 @@ class NextGraph extends RemoteBase implements Remote {
     // Persist only after SDK startup succeeds, so an unsupported optional SDK
     // leaves the guest/current-provider selection unchanged.
     this.rs.setBackend('nextgraph');
-    const session = await nativeSession(sdk);
+    const session = await nativeSession(sdk, this.walletURL);
     const ng = sdk.web.ng;
     if (generation !== this.generation) { throw new Error('Nextgraph connection was cancelled.'); }
     const store = 'did:ng:' + session.private_store_id;
@@ -587,9 +606,11 @@ class NextGraph extends RemoteBase implements Remote {
   static _rs_supported(): boolean { return typeof window !== 'undefined' && typeof MessageChannel !== 'undefined'; }
   static _rs_init(rs: RemoteStorage): void {
     rs.nextgraph = new NextGraph(rs);
+    // A URL only prefills a destination. In a new browser-storage partition the
+    // user confirms it again; an embedding page cannot authorize itself by URL.
     if (rs.backend === 'nextgraph') {
       rs.nextgraph.previousRemote = rs.remote; rs.remote = rs.nextgraph;
-      if (window.self !== window.top) {
+      if (window.self !== window.top && (!requestedWalletURL() || requestedWalletURL() === rememberedWalletURL())) {
         rs.nextgraph.resume = () => rs.nextgraph.connect().catch(error => rs._emit('error', error));
         rs.on('features-loaded', rs.nextgraph.resume);
       }
