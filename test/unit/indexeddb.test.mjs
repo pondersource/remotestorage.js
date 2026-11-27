@@ -56,6 +56,21 @@ describe("IndexedDB", () => {
       request.onsuccess();
     });
 
+    it("releases its cache handle when another tab requests deletion", () => {
+      const close = sinon.spy();
+      const request = { result: {
+        objectStoreNames: createObjectStoreNames(new Set(["nodes", "changes"])),
+        close
+      } };
+      globalThis.indexedDB = { open: () => request };
+
+      IndexedDB.open("remotestorage", () => {});
+      request.onsuccess();
+      request.result.onversionchange();
+
+      expect(close.calledOnce).to.equal(true);
+    });
+
     it("closes a database with missing object stores before deleting it", () => {
       const close = sinon.spy();
       const stores = new Set(["changes"]);
