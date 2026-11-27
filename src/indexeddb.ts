@@ -379,7 +379,10 @@ class IndexedDB extends CachingLayer {
           return;
         }
 
-        callback(null, req.result);
+        // Disconnect in another tab deletes the shared cache. An idle
+        // connection must release its handle so the deletion can finish.
+        db.onversionchange = () => db.close();
+        callback(null, db);
       };
     } catch (error) {
       log("[IndexedDB] Failed to open database: " + error);
