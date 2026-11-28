@@ -47,7 +47,7 @@ const Features = {
       this.featureModules.Solid = this.constructor.Solid;
     }
 
-    for (const name of ['LWS', 'OneDrive', 'NextGraph']) {
+    for (const name of ['LWS', 'OneDrive', 'NextGraph', 'Atomic']) {
       if (this.constructor[name]) { this.featureModules[name] = this.constructor[name]; }
     }
 
@@ -235,7 +235,7 @@ const Features = {
         this._emit('connected');
       }
 
-      if (!this.hasFeature('Authorize') || ['solid', 'lws', 'onedrive', 'nextgraph'].includes(this.backend)) {
+      if (!this.hasFeature('Authorize') || ['solid', 'lws', 'onedrive', 'nextgraph', 'atomic'].includes(this.backend)) {
         this.remote.stopWaitingForToken();
       }
     }
