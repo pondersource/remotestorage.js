@@ -32,9 +32,8 @@ async function connectionRecord(mode: IDBTransactionMode, operation: (records: I
 function wait(signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    let timer: ReturnType<typeof setTimeout>;
     const abort = () => { clearTimeout(timer); reject(signal.reason); };
-    timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, 2000);
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, 2000);
     signal.addEventListener('abort', abort, { once: true });
   });
 }
