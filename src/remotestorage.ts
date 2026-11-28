@@ -32,6 +32,7 @@ import type { Sync } from './sync';
 import type LWS from './lws';
 import type OneDrive from './onedrive';
 import type NextGraph from './nextgraph';
+import type Atomic from './atomic';
 import type { SolidBackend, SolidFeature } from './interfaces/solid-backend';
 
 // TODO this is assigned to RemoteStorage.util later; check if still needed
@@ -87,7 +88,7 @@ const AUTHORIZED_SCOPE_KEY = 'remotestorage:authorized-scope';
 const PENDING_SCOPE_KEY = 'remotestorage:pending-scope';
 
 interface StoredScopeSettings {
-  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph';
+  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph' | 'atomic';
   scope?: string;
 }
 
@@ -383,6 +384,7 @@ export class RemoteStorage {
   static OneDrive?: typeof OneDrive;
   static NextGraph?: typeof NextGraph;
   static AtomicPlugin?: boolean;
+  static Atomic?: typeof Atomic;
 
   /**
    * Pending get/put/delete calls
@@ -446,7 +448,7 @@ export class RemoteStorage {
 
   /**
    */
-  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph';
+  backend?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph' | 'atomic';
 
   /**
    * Depending on the chosen backend, this is either an instance of `WireClient`,
@@ -483,6 +485,7 @@ export class RemoteStorage {
   lws?: LWS;
   onedrive?: OneDrive;
   nextgraph?: NextGraph;
+  atomic?: Atomic;
   _lwsPreviousRemote?: Remote;
 
   /**
@@ -533,7 +536,8 @@ export class RemoteStorage {
           (backendType === 'solid' && (this.constructor as typeof RemoteStorage).Solid) ||
           (backendType === 'lws' && (this.constructor as typeof RemoteStorage).LWS) ||
           (backendType === 'onedrive' && (this.constructor as typeof RemoteStorage).OneDrive) ||
-          (backendType === 'nextgraph' && (this.constructor as typeof RemoteStorage).NextGraph)) {
+          (backendType === 'nextgraph' && (this.constructor as typeof RemoteStorage).NextGraph) ||
+          (backendType === 'atomic' && (this.constructor as typeof RemoteStorage).Atomic?._rs_supported())) {
         this.setBackend(backendType);
       } else {
         this.setBackend('remotestorage');
@@ -932,7 +936,7 @@ export class RemoteStorage {
   /**
    * @internal
    */
-  setBackend (backendType?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph'): void {
+  setBackend (backendType?: 'remotestorage' | 'dropbox' | 'googledrive' | 'solid' | 'lws' | 'onedrive' | 'nextgraph' | 'atomic'): void {
     this.backend = backendType;
 
     if (hasLocalStorage) {
