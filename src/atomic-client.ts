@@ -35,7 +35,7 @@ export interface AtomicSDK {
   decodeGenesisCert(encoded: Uint8Array): unknown;
   verifyGenesisCert(certificate: unknown, key: string): Promise<boolean>;
   genesisSignerDid(certificate: unknown): string;
-  signRequest(url: string, agent: AtomicAgent, headers: HeadersInit, options: { method: string }): Promise<HeadersInit>;
+  signRequest(url: string, agent: AtomicAgent, headers: HeadersInit): Promise<HeadersInit>;
   server: { classes: { drive: string } };
 }
 
@@ -49,6 +49,7 @@ export interface AtomicConnection {
 const core = 'https://atomicdata.dev/properties/';
 const collections = core + 'collection/';
 const pageSize = 100;
+const publicAgent = 'https://atomicdata.dev/agents/publicAgent';
 
 export function atomicOrigin(value: string): string {
   const url = new URL(value);
@@ -91,7 +92,9 @@ export async function atomicClient(sdk: AtomicSDK, connection: AtomicConnection,
     if (url.origin !== node) { throw new Error('Atomic request left the selected server.'); }
     signal?.throwIfAborted();
     const method = init.method ?? 'GET';
-    const headers = method === 'GET' ? await sdk.signRequest(url.href, agent, init.headers, { method }) : init.headers;
+    // GET resource and query handlers use Atomic's URL-bound read signature.
+    // Commits carry a separate signature over the complete commit body.
+    const headers = method === 'GET' ? await sdk.signRequest(url.href, agent, init.headers) : init.headers;
     const controller = new AbortController();
     const abort = () => controller.abort(signal?.reason || init.signal?.reason);
     signal?.addEventListener('abort', abort, { once: true });
@@ -120,7 +123,7 @@ export async function atomicClient(sdk: AtomicSDK, connection: AtomicConnection,
     try {
       root = await read(drive);
     } catch (error) {
-      if (/(^|\D)(401|403|404)(\D|$)|unauthorized|forbidden|no read rights|not found/i.test(String(error))) {
+      if (/(^|\D)404(\D|$)|no .*read right|not found/i.test(String(error))) {
         throw new AtomicGrantPending('Approve Read and edit for the selected drive in Atomic.');
       }
       throw error;
@@ -134,8 +137,12 @@ export async function atomicClient(sdk: AtomicSDK, connection: AtomicConnection,
         root.get(core + 'createdBy') !== sdk.genesisSignerDid(certificate)) {
       throw new Error('The selected server returned an invalid Atomic drive certificate.');
     }
-    if (!root.getSubjects(core + 'read').includes(agent.subject) ||
-        !root.getSubjects(core + 'write').includes(agent.subject)) {
+    const readers = root.getSubjects(core + 'read');
+    const writers = root.getSubjects(core + 'write');
+    if (root.get(core + 'parent') || readers.includes(publicAgent) || writers.includes(publicAgent)) {
+      throw new Error('Choose a private Atomic drive for your app data.');
+    }
+    if (!readers.includes(agent.subject) || !writers.includes(agent.subject)) {
       throw new AtomicGrantPending('Approve Read and edit for the selected drive in Atomic.');
     }
     return root;

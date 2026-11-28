@@ -12,6 +12,7 @@ function fixture() {
   const requests = [];
   let canRead = true;
   let canWrite = true;
+  let isPublic = false;
   let failWrite = false;
   const sdk = {
     Agent: { fromCryptoKeyPair: (keys, subject) => ({
@@ -24,7 +25,7 @@ function fixture() {
       link.searchParams.set('target', targets[0]);
       return link.href;
     },
-    signRequest: async (url, agent, headers) => ({ ...headers, 'x-atomic-agent': agent.subject, 'x-atomic-signature-version': '2' }),
+    signRequest: async (url, agent, headers) => ({ ...headers, 'x-atomic-agent': agent.subject, 'x-atomic-signature': 'fixture-signature' }),
     server: { classes: { drive: 'atomic-drive' } },
     LoroLoader: { initializeLoro: async () => {} },
     decodeB64: value => value,
@@ -64,7 +65,7 @@ function fixture() {
       revisions.push(JSON.parse(init.body));
       return new Response('');
     }
-    assert.equal(init.headers['x-atomic-signature-version'], '2');
+    assert.equal(init.headers['x-atomic-signature'], 'fixture-signature');
     const agent = init.headers['x-atomic-agent'];
     if (url.pathname === '/query') {
       assert.equal(url.searchParams.get('drive'), id);
@@ -78,7 +79,8 @@ function fixture() {
     if (subject !== id) return Response.json({ properties: revisions[Number(subject.slice('atomic:'.length))] });
     return Response.json({ classes: ['atomic-drive'], properties: {
       [core + 'genesis']: 'genesis', [core + 'createdBy']: 'did:owner',
-      [core + 'read']: canRead ? [agent] : [], [core + 'write']: canWrite ? [agent] : []
+      [core + 'read']: [...(canRead ? [agent] : []), ...(isPublic ? ['https://atomicdata.dev/agents/publicAgent'] : [])],
+      [core + 'write']: canWrite ? [agent] : []
     } });
   };
   Atomic.loadSDK = async () => sdk;
@@ -91,7 +93,7 @@ function fixture() {
   rs.access.claim('notes', 'rw');
   Atomic._rs_init(rs);
   return { rs, requests, revisions,
-    revokeRead() { canRead = false; }, revokeWrite() { canWrite = false; }, failWrite() { failWrite = true; } };
+    makePublic() { isPublic = true; }, revokeWrite() { canWrite = false; }, failWrite() { failWrite = true; } };
 }
 
 describe('Atomic app-key storage backend', () => {
@@ -154,6 +156,14 @@ describe('Atomic app-key storage backend', () => {
     await selected.waitForGrant();
     revokeWrite();
     await assert.rejects(rs.remote.put('/notes/example', 'value', 'text/plain'), /Approve Read and edit/);
+  });
+
+  it('does not put private documents in a publicly readable drive', async () => {
+    const { rs, makePublic } = fixture();
+    makePublic();
+    const selected = await rs.atomic.requestAppKey('https://atomic.place', { drive: id, signal: new AbortController().signal });
+    await assert.rejects(selected.waitForGrant(), /Choose a private Atomic drive/);
+    assert.equal(rs.remote.connected, false);
   });
 
   it('reports conflicts and a failed online acknowledgement without claiming a successful write', async () => {
